@@ -116,12 +116,18 @@ dist: wheel sdist
 
 # Dry-run publish to TestPyPI
 publish-test:
+    uv sync --group dev --no-install-project
     uv run maturin publish --repository testpypi
 
 # Publish to PyPI (use GitHub Actions for production releases)
 publish:
     @echo "For production releases, use: git tag python-v<version> && git push origin python-v<version>"
-    @echo "Or run: uv run maturin publish"
+    @echo "Or run: just publish-live"
+
+# Publish to PyPI from local machine (ensures maturin is available)
+publish-live:
+    uv sync --group dev --no-install-project
+    uv run maturin publish
 
 # ===== Interactive =====
 

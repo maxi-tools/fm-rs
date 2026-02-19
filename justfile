@@ -159,6 +159,14 @@ py-test-all:
 py-wheel:
     just -f bindings/python/justfile wheel
 
+# Publish Python package to PyPI (synces dev deps including maturin first)
+py-publish:
+    just -f bindings/python/justfile publish-live
+
+# Publish Python package to TestPyPI (synces dev deps including maturin first)
+py-publish-test:
+    just -f bindings/python/justfile publish-test
+
 # Run Python checks (clippy, fmt, test)
 py-check:
     just -f bindings/python/justfile check

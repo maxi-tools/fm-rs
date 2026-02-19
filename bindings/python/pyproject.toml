@@ -32,7 +32,6 @@ Issues = "https://github.com/blacktop/fm-rs/issues"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-python-source = "."
 module-name = "fm"
 strip = true
 

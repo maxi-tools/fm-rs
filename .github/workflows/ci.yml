@@ -104,7 +104,7 @@ jobs:
         with:
           working-directory: bindings/python
           args: --release --out dist
-          maturin-version: '1.8'
+          maturin-version: '1.11.5'
 
       - name: Test wheel installation
         run: |
