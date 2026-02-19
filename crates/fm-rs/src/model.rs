@@ -1,10 +1,15 @@
-//! `SystemLanguageModel` and `ModelAvailability` types.
+//! `SystemLanguageModel`, `TokenUsage`, and `ModelAvailability` types.
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::ptr::{self, NonNull};
+use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::ffi::{self, AvailabilityCode, SwiftPtr};
+use crate::tool::{Tool, tools_to_json};
+
+const TOKEN_USAGE_UNAVAILABLE_SENTINEL: i64 = -2;
+const TOKEN_ESTIMATE_CHARS_PER_TOKEN: usize = 4;
 
 /// Represents the availability status of a `FoundationModel`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +75,13 @@ pub struct SystemLanguageModel {
     ptr: NonNull<std::ffi::c_void>,
 }
 
+/// Token usage returned by `SystemLanguageModel` 26.4+ APIs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenUsage {
+    /// Number of tokens reported by the framework.
+    pub token_count: usize,
+}
+
 impl SystemLanguageModel {
     /// Creates the default system language model.
     ///
@@ -124,6 +136,77 @@ impl SystemLanguageModel {
             None => Ok(()),
         }
     }
+
+    /// Returns token usage for a prompt.
+    ///
+    /// Uses platform token-usage APIs when available in both the build SDK and runtime.
+    /// Otherwise returns a heuristic estimate.
+    pub fn token_usage_for(&self, prompt: &str) -> Result<TokenUsage> {
+        let prompt_c = CString::new(prompt)?;
+        let mut error: SwiftPtr = ptr::null_mut();
+
+        let token_count = unsafe {
+            ffi::fm_model_token_usage_for(self.ptr.as_ptr(), prompt_c.as_ptr(), &raw mut error)
+        };
+
+        if !error.is_null() {
+            return Err(error_from_swift(error));
+        }
+
+        if token_count == TOKEN_USAGE_UNAVAILABLE_SENTINEL {
+            return Ok(TokenUsage {
+                token_count: estimate_tokens(prompt, TOKEN_ESTIMATE_CHARS_PER_TOKEN),
+            });
+        }
+
+        token_usage_from_raw(token_count)
+    }
+
+    /// Returns token usage for session instructions and tool definitions.
+    ///
+    /// Tool definitions are serialized from the Rust [`Tool`] trait objects.
+    /// Uses platform token-usage APIs when available in both the build SDK and runtime.
+    /// Otherwise returns a heuristic estimate.
+    pub fn token_usage_for_tools(
+        &self,
+        instructions: &str,
+        tools: &[Arc<dyn Tool>],
+    ) -> Result<TokenUsage> {
+        let instructions_c = CString::new(instructions)?;
+        let tools_json = if tools.is_empty() {
+            None
+        } else {
+            let tool_refs: Vec<&dyn Tool> = tools.iter().map(std::convert::AsRef::as_ref).collect();
+            Some(CString::new(tools_to_json(&tool_refs)?)?)
+        };
+        let tools_ptr = tools_json.as_ref().map_or(ptr::null(), |s| s.as_ptr());
+
+        let mut error: SwiftPtr = ptr::null_mut();
+        let token_count = unsafe {
+            ffi::fm_model_token_usage_for_tools(
+                self.ptr.as_ptr(),
+                instructions_c.as_ptr(),
+                tools_ptr,
+                &raw mut error,
+            )
+        };
+
+        if !error.is_null() {
+            return Err(error_from_swift(error));
+        }
+
+        if token_count == TOKEN_USAGE_UNAVAILABLE_SENTINEL {
+            let fallback = estimate_tokens(instructions, TOKEN_ESTIMATE_CHARS_PER_TOKEN)
+                + tools_json.as_ref().map_or(0, |json| {
+                    estimate_tokens(&json.to_string_lossy(), TOKEN_ESTIMATE_CHARS_PER_TOKEN)
+                });
+            return Ok(TokenUsage {
+                token_count: fallback,
+            });
+        }
+
+        token_usage_from_raw(token_count)
+    }
 }
 
 impl std::fmt::Debug for SystemLanguageModel {
@@ -146,6 +229,25 @@ impl Drop for SystemLanguageModel {
 // internally thread-safe (uses DispatchQueue for async operations).
 unsafe impl Send for SystemLanguageModel {}
 unsafe impl Sync for SystemLanguageModel {}
+
+fn token_usage_from_raw(token_count: i64) -> Result<TokenUsage> {
+    if token_count < 0 {
+        return Err(Error::InternalError(
+            "Token usage API returned a negative token count".to_string(),
+        ));
+    }
+
+    let token_count = usize::try_from(token_count)
+        .map_err(|_| Error::InternalError("Token usage value does not fit in usize".to_string()))?;
+
+    Ok(TokenUsage { token_count })
+}
+
+fn estimate_tokens(text: &str, chars_per_token: usize) -> usize {
+    let denom = chars_per_token.max(1);
+    let chars = text.chars().count();
+    chars.div_ceil(denom)
+}
 
 /// Converts a Swift error pointer to a Rust Error.
 pub(crate) fn error_from_swift(error: SwiftPtr) -> Error {
@@ -205,5 +307,28 @@ pub(crate) fn error_from_swift(error: SwiftPtr) -> Error {
         }
         ffi::ErrorCode::InvalidInput => Error::InvalidInput(message),
         ffi::ErrorCode::Unknown => Error::InternalError(message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{estimate_tokens, token_usage_from_raw};
+
+    #[test]
+    fn token_usage_should_convert_positive_values() {
+        let usage = token_usage_from_raw(42).expect("positive token count should convert");
+        assert_eq!(usage.token_count, 42);
+    }
+
+    #[test]
+    fn token_usage_should_reject_negative_values() {
+        let err = token_usage_from_raw(-1).expect_err("negative token count should fail");
+        assert!(err.to_string().contains("negative token count"));
+    }
+
+    #[test]
+    fn estimate_tokens_should_use_div_ceil() {
+        assert_eq!(estimate_tokens("abcd", 4), 1);
+        assert_eq!(estimate_tokens("abcde", 4), 2);
     }
 }

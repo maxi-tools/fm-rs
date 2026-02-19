@@ -8,7 +8,7 @@
 
 use fm_rs::{
     CompactionConfig, ContextLimit, GenerationOptions, Result, Session, SystemLanguageModel,
-    compact_transcript,
+    compact_session_if_needed,
 };
 
 fn main() -> Result<()> {
@@ -42,14 +42,19 @@ fn main() -> Result<()> {
 
     if usage.over_limit {
         println!("\nContext limit exceeded — compacting transcript...\n");
-        let transcript_json = session.transcript_json()?;
-        let summary = compact_transcript(&model, &transcript_json, &CompactionConfig::default())?;
-        println!("Summary:\n{summary}\n");
-
-        let instructions = format!("You are a helpful assistant. Conversation summary:\n{summary}");
-        let compacted = Session::with_instructions(&model, &instructions)?;
-        let response = compacted.respond("Any food recommendations?", &options)?;
-        println!("Assistant: {}", response.content());
+        if let Some(compacted) = compact_session_if_needed(
+            &model,
+            &session,
+            &limit,
+            &CompactionConfig::default(),
+            Some("You are a helpful assistant. Keep responses concise."),
+        )? {
+            println!("Summary:\n{}\n", compacted.summary);
+            let response = compacted
+                .session
+                .respond("Any food recommendations?", &options)?;
+            println!("Assistant: {}", response.content());
+        }
     } else {
         println!("Context is within the configured limit.");
     }

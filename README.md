@@ -63,7 +63,7 @@ fn main() -> Result<(), fm_rs::Error> {
 - Tool calling with JSON argument schemas
 - Structured JSON output (explicit schemas or derive macro)
 - Transcript persistence and restoration
-- Context usage estimates and compaction helpers
+- Context usage estimates and compaction/rollover helpers
 - Prewarming and timeout-aware respond APIs
 
 ## Runtime Notes (macOS)
@@ -104,8 +104,20 @@ For best results on-device:
 
 See Apple’s guidance for more detail:
 - https://developer.apple.com/documentation/foundationmodels/prompting-an-on-device-foundation-model
+- https://developer.apple.com/documentation/technotes/tn3193-managing-the-on-device-foundation-model-s-context-window
 - https://developer.apple.com/videos/play/wwdc2024/10150/
 - https://developer.apple.com/videos/play/wwdc2024/10163/
+
+## FoundationModels Updates
+
+This crate tracks Apple FoundationModels updates from:
+- https://developer.apple.com/documentation/updates/foundationmodels
+
+Current coverage includes context-window management helpers aligned with TN3193:
+- `Session::context_usage(...)`
+- `compact_transcript(...)`
+- `compact_session_if_needed(...)`
+- `session_from_summary(...)`
 
 ## Examples
 

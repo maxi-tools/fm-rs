@@ -19,12 +19,14 @@ private enum FFIErrorCode: Int32 {
     case timeout = 6
 }
 
+let tokenUsageUnavailableSentinel: Int64 = -2
+
 // MARK: - Callback Types
 
 /// Tool callback type - Rust side implements this
 /// Parameters: userData, toolName, argumentsJson
 /// Returns: resultJson (Rust-allocated, caller must free with fm_rust_string_free)
-private typealias ToolCallbackFn = @convention(c) (
+typealias ToolCallbackFn = @convention(c) (
     UnsafeMutableRawPointer?,
     UnsafePointer<CChar>?,
     UnsafePointer<CChar>?
@@ -106,6 +108,10 @@ private func createErrorFromException(_ error: Error, defaultCode: FFIErrorCode 
     }
 }
 
+func createGenerationErrorFromException(_ error: Error) -> UnsafeMutableRawPointer {
+    createErrorFromException(error)
+}
+
 // MARK: - SystemLanguageModel
 
 /// Creates the default SystemLanguageModel.
@@ -151,7 +157,7 @@ public func fm_model_free(_ modelPtr: UnsafeMutableRawPointer?) {
 // MARK: - Tool Definition from JSON
 
 /// Tool definition parsed from Rust JSON
-private struct ToolDefinitionDTO: Decodable {
+struct ToolDefinitionDTO: Decodable {
     let name: String
     let description: String
     let argumentsSchemaJson: String
@@ -255,7 +261,7 @@ private struct ToolResultDTO: Decodable {
 // MARK: - Dynamic Tool Dispatcher
 
 /// Stores tool context for callback dispatch
-private final class ToolDispatcher: @unchecked Sendable {
+final class ToolDispatcher: @unchecked Sendable {
     let toolDefinitions: [ToolDefinitionDTO]
     let userData: UnsafeMutableRawPointer?
     let callback: ToolCallbackFn
@@ -309,13 +315,13 @@ private final class ToolDispatcher: @unchecked Sendable {
 /// Arguments for the generic tool dispatcher.
 /// The model generates this structure to invoke a Rust-defined tool.
 @Generable
-private struct GenericToolArgument: Sendable, Codable {
+struct GenericToolArgument: Sendable, Codable {
     let name: String
     let value: String
 }
 
 @Generable
-private struct GenericToolCallArguments: Sendable, Codable {
+struct GenericToolCallArguments: Sendable, Codable {
     /// The name of the tool to invoke (must match a registered Rust tool)
     let toolName: String
 
@@ -401,7 +407,7 @@ private func parseJsonFragment(_ text: String) -> Any? {
 
 /// A bridge tool that dispatches to Rust-defined tools.
 /// This is registered with FoundationModels and handles all dynamic tool calls.
-private final class GenericToolBridge: Tool, @unchecked Sendable {
+final class GenericToolBridge: Tool, @unchecked Sendable {
     typealias Arguments = GenericToolCallArguments
     typealias Output = String
 
@@ -453,7 +459,7 @@ private final class GenericToolBridge: Tool, @unchecked Sendable {
 }
 
 /// Parses tool definitions from JSON
-private func parseToolDefinitions(_ toolsJson: UnsafePointer<CChar>?) throws -> [ToolDefinitionDTO] {
+func parseToolDefinitions(_ toolsJson: UnsafePointer<CChar>?) throws -> [ToolDefinitionDTO] {
     guard let toolsJson = toolsJson else { return [] }
 
     let jsonString = String(cString: toolsJson)

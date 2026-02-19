@@ -5,9 +5,9 @@
 //!
 //! # Platform Requirements
 //!
-//! - **Minimum OS**: macOS 26.0+, iOS 26.0+, iPadOS 26.0+, visionOS 26.0+, tvOS 26.0+, watchOS 26.0+
+//! - **Minimum OS**: macOS 26.0+ or iOS/iPadOS 26.0+
 //! - **Apple Intelligence**: Must be enabled on the device
-//! - **Device**: Must support Apple Intelligence
+//! - **Device**: Apple Silicon / Apple Intelligence-capable device
 //!
 //! # Quick Start
 //!
@@ -155,11 +155,12 @@ pub use serde_json as __serde_json;
 
 // Re-export public API
 pub use crate::context::{
-    CompactionConfig, ContextLimit, ContextUsage, DEFAULT_CONTEXT_TOKENS, compact_transcript,
-    context_usage_from_transcript, estimate_tokens, transcript_to_text,
+    CompactedSession, CompactionConfig, ContextLimit, ContextUsage, DEFAULT_CONTEXT_TOKENS,
+    compact_session_if_needed, compact_transcript, compacted_instructions,
+    context_usage_from_transcript, estimate_tokens, session_from_summary, transcript_to_text,
 };
 pub use crate::error::{Error, Result, ToolCallError};
-pub use crate::model::{ModelAvailability, SystemLanguageModel};
+pub use crate::model::{ModelAvailability, SystemLanguageModel, TokenUsage};
 pub use crate::options::{GenerationOptions, GenerationOptionsBuilder, Sampling};
 pub use crate::session::{Response, Session};
 pub use crate::tool::{Tool, ToolOutput};

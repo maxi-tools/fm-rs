@@ -31,10 +31,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     let swift_src = PathBuf::from("src/swift/ffi.swift");
+    let token_usage_api_src = PathBuf::from("src/swift/token_usage_api.swift");
+    let token_usage_fallback_src = PathBuf::from("src/swift/token_usage_fallback.swift");
     let module_name = "fm_ffi";
     let lib_name = format!("lib{module_name}.a");
 
     println!("cargo:rerun-if-changed={}", swift_src.display());
+    println!("cargo:rerun-if-changed={}", token_usage_api_src.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        token_usage_fallback_src.display()
+    );
 
     // Determine Swift compiler
     // SECURITY: SWIFTC is trusted build-time configuration. Command::new() does not
@@ -49,9 +56,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Get SDK path from xcrun
     let sdk_path = get_sdk_path(&swift_target);
+    let sdk_name = get_sdk_name(&swift_target);
+    let use_token_usage_api = sdk_name.is_some_and(sdk_supports_token_usage_api);
+    let token_usage_src = if use_token_usage_api {
+        &token_usage_api_src
+    } else {
+        &token_usage_fallback_src
+    };
 
     let swift_output_str = swift_output.to_str().ok_or("Invalid output path")?;
     let swift_src_str = swift_src.to_str().ok_or("Invalid Swift source path")?;
+    let token_usage_src_str = token_usage_src
+        .to_str()
+        .ok_or("Invalid token usage Swift source path")?;
 
     let mut swift_args: Vec<String> = vec![
         "-emit-library".to_string(),
@@ -71,6 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     swift_args.push(swift_src_str.to_string());
+    swift_args.push(token_usage_src_str.to_string());
 
     println!("Compiling Swift code with: swiftc {}", swift_args.join(" "));
 
@@ -158,21 +176,7 @@ fn get_swift_lib_path() -> Option<String> {
 
 /// Gets the SDK path for the given Swift target
 fn get_sdk_path(swift_target: &str) -> Option<String> {
-    let sdk_name = if swift_target.contains("macosx") {
-        "macosx"
-    } else if swift_target.contains("ios") && swift_target.contains("simulator") {
-        "iphonesimulator"
-    } else if swift_target.contains("ios") {
-        "iphoneos"
-    } else if swift_target.contains("xros") {
-        "xros"
-    } else if swift_target.contains("tvos") {
-        "appletvos"
-    } else if swift_target.contains("watchos") {
-        "watchos"
-    } else {
-        return None;
-    };
+    let sdk_name = get_sdk_name(swift_target)?;
 
     let output = Command::new("xcrun")
         .args(["--show-sdk-path", "--sdk", sdk_name])
@@ -185,4 +189,69 @@ fn get_sdk_path(swift_target: &str) -> Option<String> {
     } else {
         Some(path)
     }
+}
+
+fn get_sdk_name(swift_target: &str) -> Option<&'static str> {
+    if swift_target.contains("macosx") {
+        Some("macosx")
+    } else if swift_target.contains("ios") && swift_target.contains("simulator") {
+        Some("iphonesimulator")
+    } else if swift_target.contains("ios") {
+        Some("iphoneos")
+    } else if swift_target.contains("xros") {
+        Some("xros")
+    } else if swift_target.contains("tvos") {
+        Some("appletvos")
+    } else if swift_target.contains("watchos") {
+        Some("watchos")
+    } else {
+        None
+    }
+}
+
+fn sdk_supports_token_usage_api(sdk_name: &str) -> bool {
+    let Ok(output) = Command::new("xcrun")
+        .args(["--show-sdk-version", "--sdk", sdk_name])
+        .output()
+    else {
+        println!(
+            "cargo:warning=Failed to execute 'xcrun --show-sdk-version --sdk {sdk_name}'. Falling back to token usage stubs."
+        );
+        return false;
+    };
+
+    let version = String::from_utf8_lossy(&output.stdout);
+    let trimmed_version = version.trim();
+    let mut parts = trimmed_version.split('.');
+
+    let major = if let Some(value) = parts.next() {
+        if let Ok(parsed) = value.parse::<u32>() {
+            parsed
+        } else {
+            println!(
+                "cargo:warning=Failed to parse SDK major version '{trimmed_version}' for sdk '{sdk_name}'. Falling back to token usage stubs."
+            );
+            return false;
+        }
+    } else {
+        println!(
+            "cargo:warning=SDK version output was empty for sdk '{sdk_name}'. Falling back to token usage stubs."
+        );
+        return false;
+    };
+
+    let minor = if let Some(value) = parts.next() {
+        if let Ok(parsed) = value.parse::<u32>() {
+            parsed
+        } else {
+            println!(
+                "cargo:warning=Failed to parse SDK minor version '{trimmed_version}' for sdk '{sdk_name}'. Falling back to token usage stubs."
+            );
+            return false;
+        }
+    } else {
+        0
+    };
+
+    major > 26 || (major == 26 && minor >= 4)
 }

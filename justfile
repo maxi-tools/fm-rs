@@ -68,7 +68,7 @@ example-streaming:
 
 # Run the context example
 example-context:
-    cargo run --example context
+    cargo run --example context_compaction
 
 # Publish fm-rs-derive to crates.io (run first)
 publish-derive:

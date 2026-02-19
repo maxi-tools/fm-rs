@@ -40,8 +40,8 @@ sdist:
 install:
     #!/usr/bin/env bash
     rm -rf .venv/lib/python*/site-packages/fm*
-    uv run maturin build --out dist
-    uv pip install dist/fm-*.whl
+    .venv/bin/maturin build --out dist
+    uv pip install dist/fm_rs-*.whl
     rm -rf dist/
 
 # Run unit tests (no Apple Intelligence required)

@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 [dependencies]
 fm-rs.workspace = true
 serde_json.workspace = true
-pyo3 = { version = "0.27", features = ["extension-module", "abi3-py310"] }
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py310"] }
 
 [lints]
 workspace = true

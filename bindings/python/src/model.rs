@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use crate::error::to_py_err;
 
 /// Represents the availability status of a `FoundationModel`.
-#[pyclass(eq, eq_int, module = "fm")]
+#[pyclass(eq, eq_int, module = "fm", from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelAvailability {
     /// Model is available and ready to use.
@@ -44,7 +44,7 @@ impl From<fm_rs::ModelAvailability> for ModelAvailability {
 ///     model = `SystemLanguageModel()`
 ///     if `model.is_available`:
 ///         print("Model is ready to use!")
-#[pyclass(module = "fm")]
+#[pyclass(module = "fm", from_py_object)]
 #[derive(Clone)]
 pub struct SystemLanguageModel {
     inner: Arc<fm_rs::SystemLanguageModel>,

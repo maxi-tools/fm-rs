@@ -79,6 +79,14 @@ pub struct ContextUsage {
     pub over_limit: bool,
 }
 
+/// Result of compacting a session into a new summarized session.
+pub struct CompactedSession {
+    /// Newly created session seeded with compacted summary instructions.
+    pub session: Session,
+    /// Compacted summary generated from the prior transcript.
+    pub summary: String,
+}
+
 /// Configuration for transcript compaction.
 #[derive(Debug, Clone)]
 pub struct CompactionConfig {
@@ -173,6 +181,61 @@ pub fn compact_transcript(
     }
 
     Ok(summary)
+}
+
+/// Compacts a session transcript and creates a new summarized session when needed.
+///
+/// This helper implements a common context-window rollover pattern:
+/// 1. Estimate usage from the current session transcript.
+/// 2. If still within budget, return `Ok(None)`.
+/// 3. If over budget, summarize the transcript and return a fresh `Session`.
+///
+/// `base_instructions` are prepended to the generated summary in the compacted session.
+pub fn compact_session_if_needed(
+    model: &SystemLanguageModel,
+    session: &Session,
+    limit: &ContextLimit,
+    config: &CompactionConfig,
+    base_instructions: Option<&str>,
+) -> Result<Option<CompactedSession>> {
+    let usage = session.context_usage(limit)?;
+    if !usage.over_limit {
+        return Ok(None);
+    }
+
+    let transcript_json = session.transcript_json()?;
+    let summary = compact_transcript(model, &transcript_json, config)?;
+    let compacted = session_from_summary(model, base_instructions, &summary)?;
+
+    Ok(Some(CompactedSession {
+        session: compacted,
+        summary,
+    }))
+}
+
+/// Creates a new session from optional base instructions and a conversation summary.
+pub fn session_from_summary(
+    model: &SystemLanguageModel,
+    base_instructions: Option<&str>,
+    summary: &str,
+) -> Result<Session> {
+    match compacted_instructions(base_instructions, summary) {
+        Some(instructions) => Session::with_instructions(model, &instructions),
+        None => Session::new(model),
+    }
+}
+
+/// Builds instructions text for a compacted session.
+pub fn compacted_instructions(base_instructions: Option<&str>, summary: &str) -> Option<String> {
+    let base = base_instructions.map_or("", str::trim);
+    let summary = summary.trim();
+
+    match (base.is_empty(), summary.is_empty()) {
+        (true, true) => None,
+        (false, true) => Some(base.to_string()),
+        (true, false) => Some(format!("Conversation summary:\n{summary}")),
+        (false, false) => Some(format!("{base}\n\nConversation summary:\n{summary}")),
+    }
 }
 
 /// Extracts readable text from transcript JSON.
@@ -321,5 +384,22 @@ mod tests {
         let text = "Line one\nLine two\nLine three";
         let chunks = chunk_text(text, 2, 4);
         assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn test_compacted_instructions() {
+        assert_eq!(compacted_instructions(None, ""), None);
+        assert_eq!(
+            compacted_instructions(Some("You are helpful."), ""),
+            Some("You are helpful.".to_string())
+        );
+        assert_eq!(
+            compacted_instructions(None, "Summary body"),
+            Some("Conversation summary:\nSummary body".to_string())
+        );
+        assert_eq!(
+            compacted_instructions(Some("You are helpful."), "Summary body"),
+            Some("You are helpful.\n\nConversation summary:\nSummary body".to_string())
+        );
     }
 }

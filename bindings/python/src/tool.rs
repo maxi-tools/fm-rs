@@ -10,7 +10,7 @@ use pyo3::types::PyDict;
 use serde_json::Value;
 
 /// Output returned by a tool invocation.
-#[pyclass(module = "fm")]
+#[pyclass(module = "fm", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct ToolOutput {
     /// The content returned by the tool.

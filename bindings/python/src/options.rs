@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 
 /// Sampling strategy for token generation.
-#[pyclass(eq, eq_int, module = "fm")]
+#[pyclass(eq, eq_int, module = "fm", from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sampling {
     /// Greedy sampling: always pick the most likely token.
@@ -34,7 +34,7 @@ impl From<fm_rs::Sampling> for Sampling {
 ///
 /// Example:
 ///     options = GenerationOptions(temperature=0.7, `max_response_tokens=500`)
-#[pyclass(module = "fm")]
+#[pyclass(module = "fm", from_py_object)]
 #[derive(Debug, Clone, Default)]
 pub struct GenerationOptions {
     inner: fm_rs::GenerationOptions,

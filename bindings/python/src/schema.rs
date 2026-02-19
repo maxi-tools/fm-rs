@@ -15,7 +15,7 @@ use crate::tool::json_to_py;
 ///         .property("name", `Schema.string()`, required=True)
 ///         .property("age", Schema.integer().minimum(0)))
 ///     result = `session.respond_structured("Generate` a person", `schema.to_dict()`)
-#[pyclass(module = "fm")]
+#[pyclass(module = "fm", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct Schema {
     inner: Map<String, Value>,

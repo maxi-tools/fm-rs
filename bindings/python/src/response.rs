@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 
 /// Response returned by the model.
-#[pyclass(module = "fm")]
+#[pyclass(module = "fm", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct Response {
     content: String,

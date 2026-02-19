@@ -41,6 +41,25 @@ unsafe extern "C" {
     /// 3 = `ModelNotReady`, 4+ = Unknown
     pub fn fm_model_availability(model: SwiftPtr) -> c_int;
 
+    /// Returns token usage for a prompt using 26.4+ APIs when supported by the build SDK.
+    /// Returns `-1` on error and sets `error_out`.
+    /// Returns `-2` when token usage APIs are unavailable so Rust can use fallback estimation.
+    pub fn fm_model_token_usage_for(
+        model: SwiftPtr,
+        prompt: *const c_char,
+        error_out: *mut SwiftPtr,
+    ) -> i64;
+
+    /// Returns token usage for instructions + tools using 26.4+ APIs when supported by the build SDK.
+    /// Returns `-1` on error and sets `error_out`.
+    /// Returns `-2` when token usage APIs are unavailable so Rust can use fallback estimation.
+    pub fn fm_model_token_usage_for_tools(
+        model: SwiftPtr,
+        instructions: *const c_char,
+        tools_json: *const c_char,
+        error_out: *mut SwiftPtr,
+    ) -> i64;
+
     /// Frees a `SystemLanguageModel`.
     pub fn fm_model_free(model: SwiftPtr);
 

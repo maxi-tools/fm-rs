@@ -9,7 +9,7 @@ use crate::model::SystemLanguageModel;
 pub const DEFAULT_CONTEXT_TOKENS: usize = fm_rs::DEFAULT_CONTEXT_TOKENS;
 
 /// Configuration for estimating context usage.
-#[pyclass(module = "fm")]
+#[pyclass(module = "fm", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct ContextLimit {
     max_tokens: usize,
@@ -87,7 +87,7 @@ impl ContextLimit {
 }
 
 /// Estimated context usage for a session.
-#[pyclass(module = "fm")]
+#[pyclass(module = "fm", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct ContextUsage {
     /// Estimated number of tokens consumed by the transcript.
