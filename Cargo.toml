@@ -1,4 +1,4 @@
-3[workspace]
+[workspace]
 resolver = "3"
 members = ["crates/*", "bindings/*"]
 
