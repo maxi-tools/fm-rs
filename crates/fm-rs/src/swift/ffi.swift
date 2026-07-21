@@ -1162,7 +1162,8 @@ private func respondJson(
 }
 
 /// Sends a prompt and returns a JSON response matching the provided schema.
-/// The schema is used to instruct the model to output valid JSON.
+/// The schema is used to instruct the model to output valid JSON. On success,
+/// fm_session_last_response_usage exposes this response's usage when available.
 @_cdecl("fm_session_respond_json")
 public func fm_session_respond_json(
     _ sessionPtr: UnsafeMutableRawPointer,
@@ -1193,7 +1194,9 @@ public func fm_session_respond_json(
 }
 
 /// Sends a prompt and returns a JSON response matching the provided schema,
-/// waiting at most timeoutMs milliseconds. A zero timeout uses the existing path.
+/// waiting at most timeoutMs milliseconds. On success,
+/// fm_session_last_response_usage exposes this response's usage when available.
+/// A zero timeout uses the existing path.
 @_cdecl("fm_session_respond_json_with_timeout")
 public func fm_session_respond_json_with_timeout(
     _ sessionPtr: UnsafeMutableRawPointer,

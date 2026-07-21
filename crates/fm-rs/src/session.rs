@@ -974,11 +974,13 @@ impl Session {
         Ok(content)
     }
 
-    /// Sends a prompt and returns a structured JSON response, waiting at most `timeout`.
+    /// Sends a prompt and returns a structured JSON response with a timeout.
     ///
     /// The response content contains the extracted JSON string. On Foundation Models 27,
     /// [`Response::usage`] also exposes the framework's per-response token usage when
-    /// available. If `timeout` is zero, this uses the same path as [`respond_json`](Self::respond_json).
+    /// available. If `timeout` is zero, this uses the same path as
+    /// [`respond_json`](Self::respond_json). Positive sub-millisecond timeouts are rounded up
+    /// to one millisecond, the finest resolution supported by the Swift bridge.
     ///
     /// # Example
     ///
@@ -1604,7 +1606,7 @@ fn json_timeout_millis(timeout: Duration) -> Result<Option<u64>> {
     if timeout.is_zero() {
         Ok(None)
     } else {
-        timeout_millis(timeout).map(Some)
+        timeout_millis(timeout).map(|milliseconds| Some(milliseconds.max(1)))
     }
 }
 
@@ -1686,25 +1688,33 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn respond_json_with_timeout_has_expected_public_signature() {
-        fn assert_signature(
-            _: fn(
-                &crate::Session,
-                &str,
-                &serde_json::Value,
-                &crate::GenerationOptions,
-                Duration,
-            ) -> crate::Result<Response>,
-        ) {
-        }
-
-        assert_signature(crate::Session::respond_json_with_timeout);
-    }
+    const _: fn(
+        &crate::Session,
+        &str,
+        &serde_json::Value,
+        &crate::GenerationOptions,
+        Duration,
+    ) -> crate::Result<Response> = crate::Session::respond_json_with_timeout;
 
     #[test]
     fn respond_json_with_timeout_zero_selects_existing_json_path() {
         assert!(matches!(json_timeout_millis(Duration::ZERO), Ok(None)));
+    }
+
+    #[test]
+    fn respond_json_with_timeout_rounds_positive_sub_millisecond_values_up() {
+        for timeout in [
+            Duration::from_nanos(1),
+            Duration::from_micros(500),
+            Duration::from_micros(999),
+        ] {
+            assert!(matches!(json_timeout_millis(timeout), Ok(Some(1))));
+        }
+
+        assert!(matches!(
+            json_timeout_millis(Duration::from_millis(1)),
+            Ok(Some(1))
+        ));
     }
 
     #[test]
