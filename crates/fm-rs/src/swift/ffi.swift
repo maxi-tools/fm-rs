@@ -1196,7 +1196,8 @@ public func fm_session_respond_json(
 /// Sends a prompt and returns a JSON response matching the provided schema,
 /// waiting at most timeoutMs milliseconds. On success,
 /// fm_session_last_response_usage exposes this response's usage when available.
-/// A zero timeout uses the existing path.
+/// A zero timeout expires immediately. Rust callers that request the legacy
+/// no-timeout path use fm_session_respond_json instead.
 @_cdecl("fm_session_respond_json_with_timeout")
 public func fm_session_respond_json_with_timeout(
     _ sessionPtr: UnsafeMutableRawPointer,
@@ -1217,7 +1218,7 @@ public func fm_session_respond_json_with_timeout(
             prompt: promptString,
             schema: schemaString,
             options: options,
-            timeoutMs: timeoutMs == 0 ? nil : timeoutMs
+            timeoutMs: timeoutMs
         )
         return strdup(jsonContent)
     } catch {

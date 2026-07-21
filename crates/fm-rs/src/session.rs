@@ -458,6 +458,7 @@ impl Session {
     ///
     /// If `timeout` is zero, this behaves like
     /// [`respond_with_reasoning`](Self::respond_with_reasoning).
+    /// Positive sub-millisecond timeouts are rounded up to one millisecond.
     pub fn respond_with_reasoning_timeout(
         &self,
         prompt: &str,
@@ -516,6 +517,7 @@ impl Session {
     /// Sends a prompt and waits for the complete response, with a timeout.
     ///
     /// If `timeout` is zero, this behaves like [`respond`](Self::respond).
+    /// Positive sub-millisecond timeouts are rounded up to one millisecond.
     pub fn respond_with_timeout(
         &self,
         prompt: &str,
@@ -1597,16 +1599,22 @@ fn parse_tool_arguments(input: &str) -> std::result::Result<serde_json::Value, S
 }
 
 fn timeout_millis(timeout: Duration) -> Result<u64> {
-    u64::try_from(timeout.as_millis()).map_err(|_| {
+    let milliseconds = u64::try_from(timeout.as_millis()).map_err(|_| {
         Error::InvalidInput("Timeout is too large to represent in milliseconds".to_string())
-    })
+    })?;
+
+    if timeout.is_zero() {
+        Ok(0)
+    } else {
+        Ok(milliseconds.max(1))
+    }
 }
 
 fn json_timeout_millis(timeout: Duration) -> Result<Option<u64>> {
     if timeout.is_zero() {
         Ok(None)
     } else {
-        timeout_millis(timeout).map(|milliseconds| Some(milliseconds.max(1)))
+        timeout_millis(timeout).map(Some)
     }
 }
 
@@ -1686,6 +1694,21 @@ mod tests {
             timeout_millis(timeout),
             Err(Error::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn timeout_millis_preserves_zero_and_rounds_positive_sub_millisecond_values_up() {
+        assert!(matches!(timeout_millis(Duration::ZERO), Ok(0)));
+
+        for timeout in [
+            Duration::from_nanos(1),
+            Duration::from_micros(500),
+            Duration::from_micros(999),
+        ] {
+            assert!(matches!(timeout_millis(timeout), Ok(1)));
+        }
+
+        assert!(matches!(timeout_millis(Duration::from_millis(1)), Ok(1)));
     }
 
     const _: fn(
