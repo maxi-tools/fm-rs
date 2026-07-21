@@ -8,6 +8,9 @@
 //! - **Minimum OS**: macOS 26.0+ or iOS/iPadOS 26.0+
 //! - **Apple Intelligence**: Must be enabled on the device
 //! - **Device**: Apple Silicon / Apple Intelligence-capable device
+//! - **Private Cloud Compute**: macOS/iOS/iPadOS 27.0+, network access, and
+//!   Apple's managed `com.apple.developer.private-cloud-compute` entitlement,
+//!   authorized by the app's provisioning profile
 //!
 //! # Quick Start
 //!
@@ -160,9 +163,16 @@ pub use crate::context::{
     context_usage_from_transcript, estimate_tokens, session_from_summary, transcript_to_text,
 };
 pub use crate::error::{Error, Result, ToolCallError};
-pub use crate::model::{ModelAvailability, SystemLanguageModel, TokenUsage};
-pub use crate::options::{GenerationOptions, GenerationOptionsBuilder, Sampling};
-pub use crate::session::{Response, Session};
+pub use crate::model::{LanguageModel, ModelAvailability, SystemLanguageModel, TokenUsage};
+#[cfg(feature = "private-cloud-compute")]
+pub use crate::model::{PrivateCloudComputeLanguageModel, QuotaStatus, QuotaUsage};
+pub use crate::options::{
+    GenerationOptions, GenerationOptionsBuilder, ReasoningLevel, Sampling, ToolCallingMode,
+};
+pub use crate::session::{
+    Attachment, Response, Session, SessionBuilder, SessionUsage, SystemTool,
+    TranscriptErrorHandlingPolicy,
+};
 pub use crate::tool::{Tool, ToolOutput};
 
 // FFI exports for Swift to call back into Rust

@@ -11,8 +11,70 @@ use crate::context::ContextLimit;
 use crate::error::to_py_err;
 use crate::model::SystemLanguageModel;
 use crate::options::GenerationOptions;
-use crate::response::Response;
+use crate::response::{Response, SessionUsage};
 use crate::tool::{dict_to_json, json_to_py, tools_from_python};
+
+/// An image attachment for multimodal prompting (macOS/iOS 27+).
+///
+/// Example:
+///     attachment = `Attachment.file("receipt.png"`, label="receipt")
+///     response = `session.respond_with_attachments("What` does it say?", [attachment])
+#[pyclass(module = "fm", from_py_object)]
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    source: AttachmentSource,
+    label: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum AttachmentSource {
+    File(String),
+    ImageBytes(Vec<u8>),
+}
+
+#[pymethods]
+impl Attachment {
+    /// Creates an image attachment from a file path.
+    #[staticmethod]
+    #[pyo3(signature = (path, *, label=None))]
+    fn file(path: String, label: Option<String>) -> Self {
+        Self {
+            source: AttachmentSource::File(path),
+            label,
+        }
+    }
+
+    /// Creates an image attachment from encoded image bytes (PNG, JPEG, HEIC, ...).
+    #[staticmethod]
+    #[pyo3(signature = (data, *, label=None))]
+    fn image_bytes(data: Vec<u8>, label: Option<String>) -> Self {
+        Self {
+            source: AttachmentSource::ImageBytes(data),
+            label,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.source {
+            AttachmentSource::File(path) => format!("Attachment.file({path:?})"),
+            AttachmentSource::ImageBytes(bytes) => {
+                format!("Attachment.image_bytes(<{} bytes>)", bytes.len())
+            }
+        }
+    }
+}
+
+/// Converts a Python system tool name to the fm-rs enum.
+fn system_tool_from_name(name: &str) -> PyResult<fm_rs::SystemTool> {
+    match name {
+        "ocr" => Ok(fm_rs::SystemTool::Ocr),
+        "barcode_reader" => Ok(fm_rs::SystemTool::BarcodeReader),
+        "spotlight_search" => Ok(fm_rs::SystemTool::SpotlightSearch),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Unknown system tool '{other}'; expected 'ocr', 'barcode_reader', or 'spotlight_search'"
+        ))),
+    }
+}
 
 /// Resolves generation options, using defaults if not provided.
 fn resolve_options(options: Option<&GenerationOptions>) -> fm_rs::GenerationOptions {
@@ -76,32 +138,38 @@ impl Session {
     ///     instructions: Optional instructions that define the model's behavior and role.
     ///     tools: Optional list of tool objects. Each tool must have name, description,
     ///            `arguments_schema` attributes and a call(args) method.
+    ///     `system_tools`: Optional list of built-in Apple tool names
+    ///         ("ocr", "`barcode_reader`", "`spotlight_search`"); macOS/iOS 27+.
     ///
     /// Raises:
     ///     `FmError`: If session creation fails.
+    ///     `UnsupportedPlatformError`: If `system_tools` are requested on a
+    ///         pre-27 build SDK or runtime.
     #[new]
-    #[pyo3(signature = (model, *, instructions=None, tools=None))]
+    #[pyo3(signature = (model, *, instructions=None, tools=None, system_tools=None))]
     fn new(
         py: Python<'_>,
         model: &SystemLanguageModel,
         instructions: Option<&str>,
         tools: Option<Vec<Py<PyAny>>>,
+        system_tools: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let rust_tools = match tools {
             Some(py_tools) if !py_tools.is_empty() => tools_from_python(py, py_tools)?,
             _ => Vec::new(),
         };
 
-        let has_tools = !rust_tools.is_empty();
-        let inner = match (instructions, has_tools) {
-            (Some(inst), true) => {
-                fm_rs::Session::with_instructions_and_tools(model.inner(), inst, &rust_tools)
-            }
-            (Some(inst), false) => fm_rs::Session::with_instructions(model.inner(), inst),
-            (None, true) => fm_rs::Session::with_tools(model.inner(), &rust_tools),
-            (None, false) => fm_rs::Session::new(model.inner()),
+        let mut builder = fm_rs::Session::builder(model.inner().as_ref());
+        if let Some(instructions) = instructions {
+            builder = builder.instructions(instructions);
         }
-        .map_err(to_py_err)?;
+        for tool in &rust_tools {
+            builder = builder.tool(Arc::clone(tool));
+        }
+        for name in system_tools.into_iter().flatten() {
+            builder = builder.system_tool(system_tool_from_name(&name)?);
+        }
+        let inner = builder.build().map_err(to_py_err)?;
 
         Ok(Self {
             inner,
@@ -122,8 +190,8 @@ impl Session {
     ///     Session: A session restored from the transcript.
     #[staticmethod]
     fn from_transcript(model: &SystemLanguageModel, transcript_json: &str) -> PyResult<Self> {
-        let inner =
-            fm_rs::Session::from_transcript(model.inner(), transcript_json).map_err(to_py_err)?;
+        let inner = fm_rs::Session::from_transcript(model.inner().as_ref(), transcript_json)
+            .map_err(to_py_err)?;
         Ok(Self {
             inner,
             tools: Vec::new(),
@@ -196,6 +264,106 @@ impl Session {
             })
             .map_err(to_py_err)?;
         Ok(Response::from_inner(response))
+    }
+
+    /// Sends a prompt with image attachments (macOS/iOS 27+).
+    ///
+    /// Args:
+    ///     prompt: The text prompt to send.
+    ///     attachments: List of Attachment objects (file paths or image bytes).
+    ///     options: Optional generation options.
+    ///
+    /// Returns:
+    ///     Response: The model's response.
+    ///
+    /// Raises:
+    ///     `UnsupportedPlatformError`: On pre-27 build SDKs or runtimes.
+    ///     `UnsupportedCapabilityError`: If the model cannot process images.
+    #[pyo3(signature = (prompt, attachments, options=None))]
+    fn respond_with_attachments(
+        &self,
+        py: Python<'_>,
+        prompt: &str,
+        attachments: Vec<Attachment>,
+        options: Option<&GenerationOptions>,
+    ) -> PyResult<Response> {
+        let opts = resolve_options(options);
+        let inner_addr = std::ptr::from_ref(&self.inner) as usize;
+        let response = py
+            .detach(move || {
+                let inner = unsafe { &*(inner_addr as *const fm_rs::Session) };
+                let converted: Vec<fm_rs::Attachment<'_>> = attachments
+                    .iter()
+                    .map(|attachment| {
+                        let built = match &attachment.source {
+                            AttachmentSource::File(path) => fm_rs::Attachment::file(path.as_str()),
+                            AttachmentSource::ImageBytes(bytes) => {
+                                fm_rs::Attachment::image_bytes(bytes)
+                            }
+                        };
+                        match &attachment.label {
+                            Some(label) => built.with_label(label.clone()),
+                            None => built,
+                        }
+                    })
+                    .collect();
+                inner.respond_with_attachments(prompt, &converted, &opts)
+            })
+            .map_err(to_py_err)?;
+        Ok(Response::from_inner(response))
+    }
+
+    /// Returns exact cumulative token usage for this session (macOS/iOS 27+).
+    ///
+    /// Returns:
+    ///     `SessionUsage`: Input, cached-input, output, and reasoning token counts.
+    ///
+    /// Raises:
+    ///     `UnsupportedPlatformError`: On pre-27 build SDKs or runtimes.
+    fn usage(&self) -> PyResult<SessionUsage> {
+        self.inner
+            .usage()
+            .map(SessionUsage::from_inner)
+            .map_err(to_py_err)
+    }
+
+    /// Replaces this session's transcript (macOS/iOS 27+).
+    ///
+    /// Args:
+    ///     `transcript_json`: A Foundation Models transcript JSON string,
+    ///         such as one returned by `transcript_json()` and edited.
+    ///
+    /// Raises:
+    ///     `UnsupportedPlatformError`: On pre-27 build SDKs or runtimes.
+    ///     `ValueError`: If the transcript is malformed or the session is responding.
+    fn set_transcript(&self, transcript_json: &str) -> PyResult<()> {
+        self.inner
+            .set_transcript(transcript_json)
+            .map_err(to_py_err)
+    }
+
+    /// Sets or clears the transcript error handling policy (macOS/iOS 27+).
+    ///
+    /// Args:
+    ///     policy: "revert", "preserve", or None to restore the framework default.
+    ///
+    /// Raises:
+    ///     `UnsupportedPlatformError`: On pre-27 build SDKs or runtimes.
+    #[pyo3(signature = (policy))]
+    fn set_transcript_error_handling_policy(&self, policy: Option<&str>) -> PyResult<()> {
+        let policy = match policy {
+            None => None,
+            Some("revert") => Some(fm_rs::TranscriptErrorHandlingPolicy::RevertTranscript),
+            Some("preserve") => Some(fm_rs::TranscriptErrorHandlingPolicy::PreserveTranscript),
+            Some(other) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "policy must be 'revert', 'preserve', or None, got '{other}'"
+                )));
+            }
+        };
+        self.inner
+            .set_transcript_error_handling_policy(policy)
+            .map_err(to_py_err)
     }
 
     /// Sends a prompt and streams the response.

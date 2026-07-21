@@ -49,21 +49,35 @@ impl GenerationOptions {
     ///     sampling: Sampling strategy (Greedy or Random).
     ///     `max_response_tokens`: Maximum number of tokens in the response.
     ///     seed: Random seed for reproducible generation (currently not supported by Apple's API).
+    ///     `tool_calling_mode`: "allowed", "required", or "disallowed"
+    ///         (macOS/iOS 27+; ignored on older SDKs and runtimes).
     #[new]
-    #[pyo3(signature = (*, temperature=None, sampling=None, max_response_tokens=None, seed=None))]
+    #[pyo3(signature = (*, temperature=None, sampling=None, max_response_tokens=None, seed=None, tool_calling_mode=None))]
     fn new(
         temperature: Option<f64>,
         sampling: Option<Sampling>,
         max_response_tokens: Option<u32>,
         seed: Option<u64>,
+        tool_calling_mode: Option<&str>,
     ) -> PyResult<Self> {
-        // Validate temperature if provided
-        if let Some(temp) = temperature {
-            if !(0.0..=2.0).contains(&temp) {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "Temperature must be between 0.0 and 2.0",
-                ));
+        let tool_calling_mode = match tool_calling_mode {
+            None => None,
+            Some("allowed") => Some(fm_rs::ToolCallingMode::Allowed),
+            Some("required") => Some(fm_rs::ToolCallingMode::Required),
+            Some("disallowed") => Some(fm_rs::ToolCallingMode::Disallowed),
+            Some(other) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "tool_calling_mode must be 'allowed', 'required', or 'disallowed', got '{other}'"
+                )));
             }
+        };
+        // Validate temperature if provided
+        if let Some(temp) = temperature
+            && !(0.0..=2.0).contains(&temp)
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Temperature must be between 0.0 and 2.0",
+            ));
         }
 
         let inner = fm_rs::GenerationOptions {
@@ -71,6 +85,7 @@ impl GenerationOptions {
             sampling: sampling.map(Into::into),
             max_response_tokens,
             seed,
+            tool_calling_mode,
         };
 
         Ok(Self { inner })

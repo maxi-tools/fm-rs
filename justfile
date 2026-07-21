@@ -70,6 +70,27 @@ example-streaming:
 example-context:
     cargo run --example context_compaction
 
+# Build, automatically provision, sign, and run PCC (requires DEVELOPMENT_TEAM)
+example-pcc:
+    cargo build --target-dir target --example private_cloud_compute --features private-cloud-compute
+    xcodegen generate --no-env --spec xcode/PrivateCloudComputeExample/project.yml --project xcode/PrivateCloudComputeExample
+    xcodebuild -quiet \
+        -project xcode/PrivateCloudComputeExample/PrivateCloudComputeExample.xcodeproj \
+        -scheme PrivateCloudComputeExample \
+        -configuration Debug \
+        -destination 'platform=macOS,arch=arm64' \
+        -derivedDataPath target/pcc-xcode \
+        -allowProvisioningUpdates \
+        -allowProvisioningDeviceRegistration \
+        DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM:?Set DEVELOPMENT_TEAM}" \
+        PRODUCT_BUNDLE_IDENTIFIER="${PCC_BUNDLE_IDENTIFIER:-com.blacktop.fm-rs.pcc-example}" \
+        build
+    target/pcc-xcode/Build/Products/Debug/PrivateCloudComputeExample.app/Contents/MacOS/PrivateCloudComputeExample
+
+# Create the release commit and tag without publishing crates
+release:
+    cargo release --execute --no-publish
+
 # Publish fm-rs-derive to crates.io (run first)
 publish-derive:
     cargo publish -p fm-rs-derive

@@ -2,7 +2,7 @@
 //!
 //! A session maintains conversation context between requests.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -12,8 +12,8 @@ use std::time::Duration;
 use crate::context::{ContextLimit, ContextUsage, context_usage_from_transcript};
 use crate::error::{Error, Result};
 use crate::ffi::{self, SwiftPtr};
-use crate::model::{SystemLanguageModel, error_from_swift};
-use crate::options::GenerationOptions;
+use crate::model::{LanguageModel, error_from_parts, error_from_swift};
+use crate::options::{GenerationOptions, ReasoningLevel};
 use crate::tool::{Tool, ToolResult, tools_to_json};
 
 /// Type alias for the tool map used in sessions.
@@ -44,12 +44,21 @@ impl Drop for CallbackGuard<'_> {
 #[derive(Debug, Clone)]
 pub struct Response {
     content: String,
+    usage: Option<SessionUsage>,
 }
 
 impl Response {
-    /// Creates a new response with the given content.
-    pub(crate) fn new(content: String) -> Self {
-        Self { content }
+    /// Creates a response, optionally carrying per-response token usage.
+    pub(crate) fn with_usage(content: String, usage: Option<SessionUsage>) -> Self {
+        Self { content, usage }
+    }
+
+    /// Returns exact token usage for this response (Foundation Models 27).
+    ///
+    /// `None` on pre-27 build SDKs or runtimes, or when the framework did
+    /// not report usage for this response.
+    pub fn usage(&self) -> Option<SessionUsage> {
+        self.usage
     }
 
     /// Gets the text content of the response.
@@ -99,45 +108,149 @@ pub struct Session {
     tool_callback_data: Option<Arc<ToolCallbackData>>,
 }
 
+/// Apple's built-in system tools for sessions (Foundation Models 27).
+///
+/// These tools run inside the framework; unlike [`Tool`] implementations,
+/// they never call back into Rust. All use Apple's default configuration.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SystemTool {
+    /// Vision text recognition over image attachments.
+    Ocr,
+    /// Vision barcode and QR-code reading over image attachments.
+    BarcodeReader,
+    /// Core Spotlight semantic search over the device index.
+    SpotlightSearch,
+}
+
+impl SystemTool {
+    fn ffi_name(self) -> &'static str {
+        match self {
+            SystemTool::Ocr => "ocr",
+            SystemTool::BarcodeReader => "barcodeReader",
+            SystemTool::SpotlightSearch => "spotlightSearch",
+        }
+    }
+}
+
+/// Builder combining instructions, custom tools, and built-in system tools.
+///
+/// ```rust,no_run
+/// use fm_rs::{Session, SystemLanguageModel, SystemTool};
+///
+/// let model = SystemLanguageModel::new()?;
+/// let session = Session::builder(&model)
+///     .instructions("Describe attached images and read any text in them.")
+///     .system_tool(SystemTool::Ocr)
+///     .build()?;
+/// # Ok::<(), fm_rs::Error>(())
+/// ```
+pub struct SessionBuilder<'m, M: LanguageModel + ?Sized> {
+    model: &'m M,
+    instructions: Option<String>,
+    tools: Vec<Arc<dyn Tool>>,
+    system_tools: Vec<SystemTool>,
+}
+
+impl<M: LanguageModel + ?Sized> SessionBuilder<'_, M> {
+    /// Sets the session instructions.
+    #[must_use]
+    pub fn instructions(mut self, instructions: impl Into<String>) -> Self {
+        self.instructions = Some(instructions.into());
+        self
+    }
+
+    /// Adds a Rust-implemented tool.
+    #[must_use]
+    pub fn tool(mut self, tool: Arc<dyn Tool>) -> Self {
+        self.tools.push(tool);
+        self
+    }
+
+    /// Adds a built-in system tool (Foundation Models 27).
+    ///
+    /// Session creation fails with [`crate::Error::UnsupportedPlatform`] on
+    /// pre-27 build SDKs or runtimes.
+    #[must_use]
+    pub fn system_tool(mut self, tool: SystemTool) -> Self {
+        self.system_tools.push(tool);
+        self
+    }
+
+    /// Builds the session.
+    pub fn build(self) -> Result<Session> {
+        Session::create_internal(
+            self.model,
+            self.instructions.as_deref(),
+            &self.tools,
+            &self.system_tools,
+        )
+    }
+}
+
 impl Session {
+    /// Creates a session builder for combining instructions, tools, and
+    /// built-in system tools.
+    pub fn builder<M: LanguageModel + ?Sized>(model: &M) -> SessionBuilder<'_, M> {
+        SessionBuilder {
+            model,
+            instructions: None,
+            tools: Vec::new(),
+            system_tools: Vec::new(),
+        }
+    }
+
     /// Creates a new session with the given model.
-    pub fn new(model: &SystemLanguageModel) -> Result<Self> {
-        Self::create_internal(model, None, &[])
+    pub fn new<M: LanguageModel + ?Sized>(model: &M) -> Result<Self> {
+        Self::create_internal(model, None, &[], &[])
     }
 
     /// Creates a new session with instructions.
     ///
     /// Instructions define the model's behavior and role.
-    pub fn with_instructions(model: &SystemLanguageModel, instructions: &str) -> Result<Self> {
-        Self::create_internal(model, Some(instructions), &[])
+    pub fn with_instructions<M: LanguageModel + ?Sized>(
+        model: &M,
+        instructions: &str,
+    ) -> Result<Self> {
+        Self::create_internal(model, Some(instructions), &[], &[])
     }
 
     /// Creates a new session with tools.
     ///
     /// Tools allow the model to call external functions during generation.
-    pub fn with_tools(model: &SystemLanguageModel, tools: &[Arc<dyn Tool>]) -> Result<Self> {
-        Self::create_internal(model, None, tools)
+    pub fn with_tools<M: LanguageModel + ?Sized>(
+        model: &M,
+        tools: &[Arc<dyn Tool>],
+    ) -> Result<Self> {
+        Self::create_internal(model, None, tools, &[])
     }
 
     /// Creates a new session with both instructions and tools.
-    pub fn with_instructions_and_tools(
-        model: &SystemLanguageModel,
+    pub fn with_instructions_and_tools<M: LanguageModel + ?Sized>(
+        model: &M,
         instructions: &str,
         tools: &[Arc<dyn Tool>],
     ) -> Result<Self> {
-        Self::create_internal(model, Some(instructions), tools)
+        Self::create_internal(model, Some(instructions), tools, &[])
     }
 
     /// Creates a session from a transcript JSON string.
     ///
     /// This allows restoring a previous conversation.
     /// Note: Restored sessions do not have tools - use `with_tools` for new sessions.
-    pub fn from_transcript(model: &SystemLanguageModel, transcript_json: &str) -> Result<Self> {
+    pub fn from_transcript<M: LanguageModel + ?Sized>(
+        model: &M,
+        transcript_json: &str,
+    ) -> Result<Self> {
         let transcript_c = CString::new(transcript_json)?;
         let mut error: SwiftPtr = ptr::null_mut();
 
         let ptr = unsafe {
-            ffi::fm_session_from_transcript(model.as_ptr(), transcript_c.as_ptr(), &raw mut error)
+            ffi::fm_session_from_transcript(
+                model.raw_model_ptr(),
+                transcript_c.as_ptr(),
+                &raw mut error,
+            )
         };
 
         if !error.is_null() {
@@ -159,13 +272,20 @@ impl Session {
     }
 
     /// Internal helper to create a session.
-    fn create_internal(
-        model: &SystemLanguageModel,
+    fn create_internal<M: LanguageModel + ?Sized>(
+        model: &M,
         instructions: Option<&str>,
         tools: &[Arc<dyn Tool>],
+        system_tools: &[SystemTool],
     ) -> Result<Self> {
         let instructions_c = instructions.map(CString::new).transpose()?;
         let instructions_ptr = instructions_c.as_ref().map_or(ptr::null(), |s| s.as_ptr());
+
+        // Serialize built-in system tool names for FFI
+        let system_tools_json = system_tools_json(system_tools)?;
+        let system_tools_ptr = system_tools_json
+            .as_ref()
+            .map_or(ptr::null(), |s| s.as_ptr());
 
         // Build tool map and serialize for FFI
         let mut tool_map = HashMap::new();
@@ -201,9 +321,10 @@ impl Session {
 
         let ptr = unsafe {
             ffi::fm_session_create(
-                model.as_ptr(),
+                model.raw_model_ptr(),
                 instructions_ptr,
                 tools_ptr,
+                system_tools_ptr,
                 user_data,
                 session_tool_callback,
                 &raw mut error,
@@ -273,7 +394,123 @@ impl Session {
             s
         };
 
-        Ok(Response::new(content))
+        Ok(Response::with_usage(
+            content,
+            self.fetch_last_response_usage(),
+        ))
+    }
+
+    /// Sends a prompt with Foundation Models 27 extended reasoning.
+    ///
+    /// Extended reasoning is a Foundation Models 27 `ContextOptions` request.
+    /// The framework decides whether the session's model honors the level;
+    /// models without the capability report a typed error. On an older build
+    /// SDK or runtime, this returns [`Error::UnsupportedPlatform`].
+    pub fn respond_with_reasoning(
+        &self,
+        prompt: &str,
+        options: &GenerationOptions,
+        reasoning_level: ReasoningLevel,
+    ) -> Result<Response> {
+        let prompt_c = CString::new(prompt)?;
+        let options_c = CString::new(options.to_json())?;
+        let mut error: SwiftPtr = ptr::null_mut();
+
+        let response_ptr = unsafe {
+            ffi::fm_session_respond_with_reasoning(
+                self.ptr.as_ptr(),
+                prompt_c.as_ptr(),
+                options_c.as_ptr(),
+                reasoning_level.as_ffi_code(),
+                &raw mut error,
+            )
+        };
+
+        if !error.is_null() {
+            return Err(error_from_swift(error));
+        }
+
+        if response_ptr.is_null() {
+            return Err(Error::GenerationError(
+                "Received null reasoning response".to_string(),
+            ));
+        }
+
+        let content = unsafe {
+            let cstr = CStr::from_ptr(response_ptr);
+            let content = cstr
+                .to_str()
+                .map_err(|error| {
+                    Error::GenerationError(format!("Invalid UTF-8 in reasoning response: {error}"))
+                })?
+                .to_owned();
+            ffi::fm_string_free(response_ptr);
+            content
+        };
+
+        Ok(Response::with_usage(
+            content,
+            self.fetch_last_response_usage(),
+        ))
+    }
+
+    /// Sends a prompt with extended reasoning and waits up to `timeout`.
+    ///
+    /// If `timeout` is zero, this behaves like
+    /// [`respond_with_reasoning`](Self::respond_with_reasoning).
+    pub fn respond_with_reasoning_timeout(
+        &self,
+        prompt: &str,
+        options: &GenerationOptions,
+        reasoning_level: ReasoningLevel,
+        timeout: Duration,
+    ) -> Result<Response> {
+        if timeout.is_zero() {
+            return self.respond_with_reasoning(prompt, options, reasoning_level);
+        }
+
+        let timeout_ms = timeout_millis(timeout)?;
+        let prompt_c = CString::new(prompt)?;
+        let options_c = CString::new(options.to_json())?;
+        let mut error: SwiftPtr = ptr::null_mut();
+
+        let response_ptr = unsafe {
+            ffi::fm_session_respond_with_reasoning_timeout(
+                self.ptr.as_ptr(),
+                prompt_c.as_ptr(),
+                options_c.as_ptr(),
+                reasoning_level.as_ffi_code(),
+                timeout_ms,
+                &raw mut error,
+            )
+        };
+
+        if !error.is_null() {
+            return Err(error_from_swift(error));
+        }
+
+        if response_ptr.is_null() {
+            return Err(Error::GenerationError(
+                "Received null reasoning response".to_string(),
+            ));
+        }
+
+        let content = unsafe {
+            let cstr = CStr::from_ptr(response_ptr);
+            let content = cstr
+                .to_str()
+                .map_err(|error| {
+                    Error::GenerationError(format!("Invalid UTF-8 in reasoning response: {error}"))
+                })?
+                .to_owned();
+            ffi::fm_string_free(response_ptr);
+            content
+        };
+
+        Ok(Response::with_usage(
+            content,
+            self.fetch_last_response_usage(),
+        ))
     }
 
     /// Sends a prompt and waits for the complete response, with a timeout.
@@ -289,9 +526,7 @@ impl Session {
             return self.respond(prompt, options);
         }
 
-        let timeout_ms = u64::try_from(timeout.as_millis()).map_err(|_| {
-            Error::InvalidInput("Timeout is too large to represent in milliseconds".to_string())
-        })?;
+        let timeout_ms = timeout_millis(timeout)?;
 
         let prompt_c = CString::new(prompt)?;
         let options_json = options.to_json();
@@ -327,7 +562,10 @@ impl Session {
             s
         };
 
-        Ok(Response::new(content))
+        Ok(Response::with_usage(
+            content,
+            self.fetch_last_response_usage(),
+        ))
     }
 
     /// Sends a prompt and streams the response.
@@ -383,11 +621,193 @@ impl Session {
         // Reclaim the state and check for errors
         let state = unsafe { Box::from_raw(state_ptr.cast::<StreamState>()) };
         let error = state.error.lock().map_err(|_| Error::PoisonError)?;
-        if let Some(err) = error.as_ref() {
-            return Err(Error::GenerationError(err.clone()));
+        if let Some((code, message)) = error.as_ref() {
+            return Err(error_from_parts(*code, message.clone()));
         }
 
         Ok(())
+    }
+
+    /// Sends a prompt with image attachments and blocks until the response
+    /// is ready (Foundation Models 27 multimodal prompting).
+    ///
+    /// The on-device model accepts images for description, extraction, and
+    /// classification; the framework handles scaling and color conversion.
+    /// With no attachments this behaves like [`respond`](Self::respond).
+    /// Requires a 27 build SDK and runtime; otherwise returns
+    /// [`Error::UnsupportedPlatform`]. Models without the image capability
+    /// report [`Error::UnsupportedCapability`].
+    pub fn respond_with_attachments(
+        &self,
+        prompt: &str,
+        attachments: &[Attachment<'_>],
+        options: &GenerationOptions,
+    ) -> Result<Response> {
+        if attachments.is_empty() {
+            return self.respond(prompt, options);
+        }
+
+        let (specs_json, buffers, buffer_lens) = attachment_specs(attachments)?;
+        let buffer_count = c_int::try_from(buffers.len())
+            .map_err(|_| Error::InvalidInput("Too many attachments".to_string()))?;
+
+        let prompt_c = CString::new(prompt)?;
+        let options_c = CString::new(options.to_json())?;
+        let specs_c = CString::new(specs_json)?;
+        let mut error: SwiftPtr = ptr::null_mut();
+
+        let response_ptr = unsafe {
+            ffi::fm_session_respond_with_attachments(
+                self.ptr.as_ptr(),
+                prompt_c.as_ptr(),
+                options_c.as_ptr(),
+                specs_c.as_ptr(),
+                buffers.as_ptr(),
+                buffer_lens.as_ptr(),
+                buffer_count,
+                &raw mut error,
+            )
+        };
+
+        if !error.is_null() {
+            return Err(error_from_swift(error));
+        }
+
+        if response_ptr.is_null() {
+            return Err(Error::GenerationError(
+                "Received null multimodal response".to_string(),
+            ));
+        }
+
+        let content = unsafe {
+            let cstr = CStr::from_ptr(response_ptr);
+            let content = cstr
+                .to_str()
+                .map_err(|error| {
+                    Error::GenerationError(format!("Invalid UTF-8 in multimodal response: {error}"))
+                })?
+                .to_owned();
+            ffi::fm_string_free(response_ptr);
+            content
+        };
+
+        Ok(Response::with_usage(
+            content,
+            self.fetch_last_response_usage(),
+        ))
+    }
+
+    /// Returns exact cumulative token usage for this session.
+    ///
+    /// Foundation Models 27 reports authoritative input, cached-input,
+    /// output, and reasoning token counts across all requests in this
+    /// session. To measure a single request, snapshot before and after and
+    /// use [`SessionUsage::delta_since`]. Apple's per-response usage
+    /// property is not yet bridged into [`Response`]. On older build SDKs
+    /// or runtimes this returns [`Error::UnsupportedPlatform`]; use
+    /// [`crate::estimate_tokens`] there instead.
+    pub fn usage(&self) -> Result<SessionUsage> {
+        let mut error: SwiftPtr = ptr::null_mut();
+        let json_ptr = unsafe { ffi::fm_session_usage(self.ptr.as_ptr(), &raw mut error) };
+
+        if !error.is_null() {
+            return Err(error_from_swift(error));
+        }
+
+        if json_ptr.is_null() {
+            return Err(Error::InternalError(
+                "Session usage returned null without an error".to_string(),
+            ));
+        }
+
+        let json = unsafe {
+            let json = CStr::from_ptr(json_ptr).to_string_lossy().into_owned();
+            ffi::fm_string_free(json_ptr);
+            json
+        };
+
+        session_usage_from_json(&json)
+    }
+
+    /// Replaces this session's transcript (Foundation Models 27).
+    ///
+    /// The JSON must be a Foundation Models `Transcript`, such as one
+    /// returned by [`transcript_json`](Self::transcript_json) and edited. Fails while
+    /// the session is responding. On older build SDKs or runtimes this
+    /// returns [`Error::UnsupportedPlatform`]; there, create a new session
+    /// with [`Session::from_transcript`] instead.
+    pub fn set_transcript(&self, transcript_json: &str) -> Result<()> {
+        let transcript_c = CString::new(transcript_json)?;
+        let mut error: SwiftPtr = ptr::null_mut();
+
+        let replaced = unsafe {
+            ffi::fm_session_set_transcript(self.ptr.as_ptr(), transcript_c.as_ptr(), &raw mut error)
+        };
+
+        if !error.is_null() {
+            return Err(error_from_swift(error));
+        }
+
+        if replaced {
+            Ok(())
+        } else {
+            Err(Error::InternalError(
+                "Transcript replacement failed without an error".to_string(),
+            ))
+        }
+    }
+
+    /// Sets or clears how the transcript is repaired after a failed request
+    /// (Foundation Models 27).
+    ///
+    /// `None` restores the framework default. On older build SDKs or
+    /// runtimes this returns [`Error::UnsupportedPlatform`].
+    pub fn set_transcript_error_handling_policy(
+        &self,
+        policy: Option<TranscriptErrorHandlingPolicy>,
+    ) -> Result<()> {
+        let code = match policy {
+            None => 0,
+            Some(TranscriptErrorHandlingPolicy::RevertTranscript) => 1,
+            Some(TranscriptErrorHandlingPolicy::PreserveTranscript) => 2,
+        };
+        let mut error: SwiftPtr = ptr::null_mut();
+
+        let applied = unsafe {
+            ffi::fm_session_set_transcript_error_policy(self.ptr.as_ptr(), code, &raw mut error)
+        };
+
+        if !error.is_null() {
+            return Err(error_from_swift(error));
+        }
+
+        if applied {
+            Ok(())
+        } else {
+            Err(Error::InternalError(
+                "Transcript policy update failed without an error".to_string(),
+            ))
+        }
+    }
+
+    /// Fetches the usage recorded for the most recent completed response.
+    ///
+    /// Returns `None` on pre-27 build SDKs or runtimes, or when no blocking
+    /// response has completed yet. Unreadable payloads also map to `None`;
+    /// [`Response::usage`] documents this as "not reported".
+    fn fetch_last_response_usage(&self) -> Option<SessionUsage> {
+        let json_ptr = unsafe { ffi::fm_session_last_response_usage(self.ptr.as_ptr()) };
+        if json_ptr.is_null() {
+            return None;
+        }
+
+        let json = unsafe {
+            let json = CStr::from_ptr(json_ptr).to_string_lossy().into_owned();
+            ffi::fm_string_free(json_ptr);
+            json
+        };
+
+        session_usage_from_json(&json).ok()
     }
 
     /// Cancels an ongoing stream operation.
@@ -682,8 +1102,8 @@ impl Session {
         // Reclaim the state and check for errors
         let state = unsafe { Box::from_raw(state_ptr.cast::<StreamState>()) };
         let error = state.error.lock().map_err(|_| Error::PoisonError)?;
-        if let Some(err) = error.as_ref() {
-            return Err(Error::GenerationError(err.clone()));
+        if let Some((code, message)) = error.as_ref() {
+            return Err(error_from_parts(*code, message.clone()));
         }
 
         Ok(())
@@ -725,10 +1145,221 @@ unsafe impl Send for Session {}
 /// Type alias for the chunk callback function.
 type ChunkCallbackFn = dyn FnMut(&str) + Send;
 
+/// An image input for Foundation Models 27 multimodal prompting.
+///
+/// Create one from a file path or from encoded image bytes (PNG, JPEG,
+/// HEIC, ...), then pass it to [`Session::respond_with_attachments`]. Label
+/// attachments so prompts can reference specific images by name.
+#[derive(Debug, Clone)]
+pub struct Attachment<'a> {
+    source: AttachmentSource<'a>,
+    label: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum AttachmentSource<'a> {
+    File(std::path::PathBuf),
+    ImageBytes(&'a [u8]),
+}
+
+fn system_tools_json(system_tools: &[SystemTool]) -> Result<Option<CString>> {
+    if system_tools.is_empty() {
+        return Ok(None);
+    }
+
+    let mut seen = HashSet::with_capacity(system_tools.len());
+    let mut names = Vec::with_capacity(system_tools.len());
+    for tool in system_tools {
+        if !seen.insert(*tool) {
+            return Err(Error::InvalidInput(format!(
+                "Duplicate built-in system tool: {}",
+                tool.ffi_name()
+            )));
+        }
+        names.push(tool.ffi_name());
+    }
+
+    Ok(Some(CString::new(serde_json::to_string(&names)?)?))
+}
+
+impl<'a> Attachment<'a> {
+    /// Creates an image attachment from a file on disk.
+    pub fn file(path: impl Into<std::path::PathBuf>) -> Attachment<'static> {
+        Attachment {
+            source: AttachmentSource::File(path.into()),
+            label: None,
+        }
+    }
+
+    /// Creates an image attachment from encoded image bytes.
+    pub fn image_bytes(bytes: &'a [u8]) -> Attachment<'a> {
+        Attachment {
+            source: AttachmentSource::ImageBytes(bytes),
+            label: None,
+        }
+    }
+
+    /// Labels the attachment so prompts can reference it by name.
+    #[must_use]
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AttachmentSpec<'a> {
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    buffer_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<&'a str>,
+}
+
+type AttachmentBuffers = (String, Vec<*const u8>, Vec<usize>);
+
+/// Serializes attachments to a JSON spec plus parallel byte-buffer arrays.
+fn attachment_specs(attachments: &[Attachment<'_>]) -> Result<AttachmentBuffers> {
+    let mut specs = Vec::with_capacity(attachments.len());
+    let mut buffers = Vec::new();
+    let mut buffer_lens = Vec::new();
+
+    for attachment in attachments {
+        let label = attachment.label.as_deref();
+        match &attachment.source {
+            AttachmentSource::File(path) => {
+                let path = path.to_str().ok_or_else(|| {
+                    Error::InvalidInput(format!(
+                        "Attachment path is not valid UTF-8: {}",
+                        path.display()
+                    ))
+                })?;
+                specs.push(AttachmentSpec {
+                    kind: "file",
+                    path: Some(path),
+                    buffer_index: None,
+                    label,
+                });
+            }
+            AttachmentSource::ImageBytes(bytes) => {
+                specs.push(AttachmentSpec {
+                    kind: "data",
+                    path: None,
+                    buffer_index: Some(buffers.len()),
+                    label,
+                });
+                buffers.push(bytes.as_ptr());
+                buffer_lens.push(bytes.len());
+            }
+        }
+    }
+
+    let json = serde_json::to_string(&specs)?;
+    Ok((json, buffers, buffer_lens))
+}
+
+/// Exact cumulative token usage reported by a Foundation Models 27 session.
+///
+/// Returned by [`Session::usage`]. Unlike [`crate::estimate_tokens`], these
+/// counts are authoritative and include prompt caching and
+/// extended-reasoning accounting.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionUsage {
+    /// Total input tokens across all requests in this session.
+    pub input_tokens: u64,
+    /// Input tokens that were served from the prompt cache.
+    pub cached_input_tokens: u64,
+    /// Total output tokens across all responses in this session.
+    pub output_tokens: u64,
+    /// Output tokens spent on extended reasoning.
+    pub reasoning_tokens: u64,
+}
+
+impl SessionUsage {
+    /// Returns the usage consumed since an earlier snapshot of this session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if any counter went backwards, which
+    /// indicates the snapshots came from different sessions or were taken
+    /// out of order.
+    pub fn delta_since(&self, earlier: &SessionUsage) -> Result<SessionUsage> {
+        let sub = |now: u64, before: u64, field: &str| {
+            now.checked_sub(before).ok_or_else(|| {
+                Error::InvalidInput(format!(
+                    "Usage {field} went backwards ({now} < {before}); snapshots must come \
+                     from the same session in order"
+                ))
+            })
+        };
+
+        Ok(SessionUsage {
+            input_tokens: sub(self.input_tokens, earlier.input_tokens, "input_tokens")?,
+            cached_input_tokens: sub(
+                self.cached_input_tokens,
+                earlier.cached_input_tokens,
+                "cached_input_tokens",
+            )?,
+            output_tokens: sub(self.output_tokens, earlier.output_tokens, "output_tokens")?,
+            reasoning_tokens: sub(
+                self.reasoning_tokens,
+                earlier.reasoning_tokens,
+                "reasoning_tokens",
+            )?,
+        })
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[expect(
+    clippy::struct_field_names,
+    reason = "the _tokens suffix maps to the FFI JSON keys and mirrors Apple's usage terminology"
+)]
+struct SessionUsageDto {
+    input_tokens: i64,
+    cached_input_tokens: i64,
+    output_tokens: i64,
+    reasoning_tokens: i64,
+}
+
+fn session_usage_from_json(json: &str) -> Result<SessionUsage> {
+    let dto: SessionUsageDto = serde_json::from_str(json)
+        .map_err(|error| Error::InternalError(format!("Invalid session usage JSON: {error}")))?;
+
+    let count = |value: i64, field: &str| {
+        u64::try_from(value).map_err(|_| {
+            Error::InternalError(format!("Session usage {field} was negative: {value}"))
+        })
+    };
+
+    Ok(SessionUsage {
+        input_tokens: count(dto.input_tokens, "inputTokens")?,
+        cached_input_tokens: count(dto.cached_input_tokens, "cachedInputTokens")?,
+        output_tokens: count(dto.output_tokens, "outputTokens")?,
+        reasoning_tokens: count(dto.reasoning_tokens, "reasoningTokens")?,
+    })
+}
+
+/// How a session repairs its transcript after a failed request
+/// (Foundation Models 27).
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptErrorHandlingPolicy {
+    /// Remove the failed request from the transcript.
+    RevertTranscript,
+    /// Keep the failed request in the transcript.
+    PreserveTranscript,
+}
+
 /// Internal state for streaming callbacks.
 struct StreamState {
     on_chunk: Mutex<Box<ChunkCallbackFn>>,
-    error: Mutex<Option<String>>,
+    error: Mutex<Option<(c_int, String)>>,
 }
 
 /// Callback invoked when a chunk arrives during streaming.
@@ -751,7 +1382,7 @@ extern "C" fn stream_done_callback(_user_data: *mut c_void) {
 }
 
 /// Callback invoked on error during streaming.
-extern "C" fn stream_error_callback(user_data: *mut c_void, _code: c_int, message: *const c_char) {
+extern "C" fn stream_error_callback(user_data: *mut c_void, code: c_int, message: *const c_char) {
     if user_data.is_null() {
         return;
     }
@@ -764,7 +1395,7 @@ extern "C" fn stream_error_callback(user_data: *mut c_void, _code: c_int, messag
     };
 
     if let Ok(mut error) = state.error.lock() {
-        *error = Some(msg);
+        *error = Some((code, msg));
     }
 }
 
@@ -873,6 +1504,12 @@ fn parse_tool_arguments(input: &str) -> std::result::Result<serde_json::Value, S
     }
 }
 
+fn timeout_millis(timeout: Duration) -> Result<u64> {
+    u64::try_from(timeout.as_millis()).map_err(|_| {
+        Error::InvalidInput("Timeout is too large to represent in milliseconds".to_string())
+    })
+}
+
 /// Maximum input size for `autoclose_json` to prevent resource exhaustion (1 MB).
 const AUTOCLOSE_JSON_MAX_SIZE: usize = 1024 * 1024;
 
@@ -906,16 +1543,8 @@ fn autoclose_json(input: &str) -> Option<String> {
             '"' => in_string = true,
             '{' => stack.push('}'),
             '[' => stack.push(']'),
-            '}' => {
-                if stack.pop() != Some('}') {
-                    return None;
-                }
-            }
-            ']' => {
-                if stack.pop() != Some(']') {
-                    return None;
-                }
-            }
+            '}' if stack.pop() != Some('}') => return None,
+            ']' if stack.pop() != Some(']') => return None,
             _ => {}
         }
     }
@@ -933,14 +1562,154 @@ fn autoclose_json(input: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::time::Duration;
+
+    use crate::error::Error;
+    use crate::session::{
+        Attachment, Response, SessionUsage, SystemTool, attachment_specs, session_usage_from_json,
+        system_tools_json, timeout_millis,
+    };
 
     #[test]
     fn test_response() {
-        let response = Response::new("Hello, world!".to_string());
+        let response = Response::with_usage("Hello, world!".to_string(), None);
         assert_eq!(response.content(), "Hello, world!");
         assert_eq!(response.as_ref(), "Hello, world!");
         assert_eq!(format!("{response}"), "Hello, world!");
         assert_eq!(response.into_content(), "Hello, world!");
+    }
+
+    #[test]
+    fn timeout_millis_rejects_values_larger_than_u64() {
+        let timeout = Duration::from_secs(u64::MAX);
+        assert!(matches!(
+            timeout_millis(timeout),
+            Err(Error::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn session_usage_should_parse_all_counters() {
+        let usage = session_usage_from_json(
+            r#"{"inputTokens":120,"cachedInputTokens":48,"outputTokens":64,"reasoningTokens":16}"#,
+        )
+        .expect("session usage JSON should parse");
+
+        assert_eq!(usage.input_tokens, 120);
+        assert_eq!(usage.cached_input_tokens, 48);
+        assert_eq!(usage.output_tokens, 64);
+        assert_eq!(usage.reasoning_tokens, 16);
+    }
+
+    #[test]
+    fn session_usage_should_reject_negative_counters() {
+        let err = session_usage_from_json(
+            r#"{"inputTokens":-1,"cachedInputTokens":0,"outputTokens":0,"reasoningTokens":0}"#,
+        )
+        .expect_err("negative token counts should fail");
+        assert!(matches!(err, Error::InternalError(_)));
+    }
+
+    #[test]
+    fn session_usage_should_reject_invalid_json() {
+        let err = session_usage_from_json("not json").expect_err("invalid JSON should fail");
+        assert!(matches!(err, Error::InternalError(_)));
+    }
+
+    #[test]
+    fn response_should_expose_optional_usage() {
+        let usage = SessionUsage {
+            input_tokens: 10,
+            cached_input_tokens: 1,
+            output_tokens: 5,
+            reasoning_tokens: 0,
+        };
+        let response = Response::with_usage("ok".to_string(), Some(usage));
+        assert_eq!(response.usage(), Some(usage));
+
+        let response = Response::with_usage("ok".to_string(), None);
+        assert_eq!(response.usage(), None);
+    }
+
+    #[test]
+    fn session_usage_delta_should_subtract_counters() {
+        let earlier = SessionUsage {
+            input_tokens: 100,
+            cached_input_tokens: 40,
+            output_tokens: 50,
+            reasoning_tokens: 10,
+        };
+        let later = SessionUsage {
+            input_tokens: 180,
+            cached_input_tokens: 90,
+            output_tokens: 75,
+            reasoning_tokens: 30,
+        };
+
+        let delta = later
+            .delta_since(&earlier)
+            .expect("in-order snapshots should subtract");
+        assert_eq!(delta.input_tokens, 80);
+        assert_eq!(delta.cached_input_tokens, 50);
+        assert_eq!(delta.output_tokens, 25);
+        assert_eq!(delta.reasoning_tokens, 20);
+    }
+
+    #[test]
+    fn session_usage_delta_should_reject_backwards_counters() {
+        let earlier = SessionUsage {
+            input_tokens: 100,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: 0,
+        };
+        let later = SessionUsage {
+            input_tokens: 50,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: 0,
+        };
+
+        let err = later
+            .delta_since(&earlier)
+            .expect_err("backwards counters should fail");
+        assert!(matches!(err, Error::InvalidInput(_)));
+    }
+
+    #[test]
+    fn attachment_specs_should_index_buffers_and_keep_labels() {
+        let bytes = [0_u8, 1, 2, 3];
+        let attachments = [
+            Attachment::file("/tmp/photo.png").with_label("photo"),
+            Attachment::image_bytes(&bytes),
+        ];
+
+        let (json, buffers, buffer_lens) =
+            attachment_specs(&attachments).expect("attachment specs should serialize");
+
+        assert_eq!(
+            json,
+            r#"[{"kind":"file","path":"/tmp/photo.png","label":"photo"},{"kind":"data","bufferIndex":0}]"#
+        );
+        assert_eq!(buffers, vec![bytes.as_ptr()]);
+        assert_eq!(buffer_lens, vec![bytes.len()]);
+    }
+
+    #[test]
+    fn attachment_specs_should_reject_non_utf8_paths() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = std::path::PathBuf::from(OsString::from_vec(vec![0x66, 0x6f, 0x80]));
+        let attachments = [Attachment::file(path)];
+        let err = attachment_specs(&attachments).expect_err("non-UTF-8 path should fail");
+        assert!(matches!(err, Error::InvalidInput(_)));
+    }
+
+    #[test]
+    fn system_tools_should_reject_duplicates() {
+        let err = system_tools_json(&[SystemTool::Ocr, SystemTool::Ocr])
+            .expect_err("duplicate built-in tools should fail");
+        assert!(matches!(err, Error::InvalidInput(_)));
     }
 }

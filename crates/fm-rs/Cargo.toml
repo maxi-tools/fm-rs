@@ -2,7 +2,6 @@
 name = "fm-rs"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors = ["blacktop"]
@@ -27,6 +26,11 @@ reqwest.workspace = true
 [features]
 default = []
 derive = ["fm-rs-derive"]
+private-cloud-compute = []
+
+[[example]]
+name = "private_cloud_compute"
+required-features = ["private-cloud-compute"]
 
 [lints]
 workspace = true

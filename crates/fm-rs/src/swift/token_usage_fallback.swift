@@ -1,4 +1,11 @@
 import Foundation
+import FoundationModels
+
+/// SDK fallback: pre-26.4 SDKs do not declare `SystemLanguageModel.contextSize`.
+func systemModelContextSizeHandler(_ model: SystemLanguageModel) -> (() throws -> Int64)? {
+    _ = model
+    return nil
+}
 
 /// Returns a sentinel so Rust can use local token estimation.
 @_cdecl("fm_model_token_usage_for")

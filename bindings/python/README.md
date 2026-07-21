@@ -140,6 +140,44 @@ if usage.over_limit:
     print(f"Summary: {summary}")
 ```
 
+## macOS 27 Capabilities
+
+On macOS/iOS 27+, sessions support image attachments, Apple's built-in
+tools, exact token accounting, and transcript controls. These raise
+`UnsupportedPlatformError` on older build SDKs or runtimes.
+
+```python
+import fm
+
+model = fm.SystemLanguageModel()
+print(model.context_size())  # model-reported context window (26.4+ SDK)
+
+session = fm.Session(
+    model,
+    instructions="Describe images and read any text in them.",
+    system_tools=["ocr"],  # also: "barcode_reader", "spotlight_search"
+)
+
+response = session.respond_with_attachments(
+    "What does this receipt say?",
+    [fm.Attachment.file("receipt.png", label="receipt")],
+    fm.GenerationOptions(tool_calling_mode="allowed"),
+)
+print(response.content)
+print(response.usage)  # per-response token usage, or None
+
+usage = session.usage()  # exact cumulative session usage
+print(usage.input_tokens, usage.cached_input_tokens,
+      usage.output_tokens, usage.reasoning_tokens)
+
+session.set_transcript_error_handling_policy("revert")  # or "preserve", None
+```
+
+Failures surface as typed exceptions on macOS 26 and 27 runtimes alike:
+`ContextSizeExceededError`, `RateLimitedError`, `GuardrailViolationError`,
+`RefusalError`, `AssetsUnavailableError`, `ConcurrentRequestsError`, and the
+`Unsupported*Error` family. Private Cloud Compute is currently Rust-only.
+
 ## Error Handling
 
 ```python
@@ -164,8 +202,10 @@ except fm.ModelNotAvailableError:
 
 - `SystemLanguageModel` - Entry point for on-device AI
 - `Session` - Maintains conversation context
-- `GenerationOptions` - Controls generation (temperature, max_tokens, etc.)
-- `Response` - Model output
+- `GenerationOptions` - Controls generation (temperature, max_tokens, tool_calling_mode, etc.)
+- `Response` - Model output, with per-response `usage` on macOS/iOS 27+
+- `SessionUsage` - Exact token usage counters (macOS/iOS 27+)
+- `Attachment` - Image input for multimodal prompting (macOS/iOS 27+)
 - `ToolOutput` - Tool invocation result
 - `ContextLimit` - Context window configuration
 - `ContextUsage` - Estimated token usage
@@ -193,6 +233,13 @@ except fm.ModelNotAvailableError:
 - `GenerationError`
 - `ToolCallError`
 - `JsonError`
+- `UnsupportedPlatformError` - API needs a newer Apple platform or SDK
+- `ContextSizeExceededError`, `RateLimitedError`, `GuardrailViolationError`,
+  `RefusalError`, `AssetsUnavailableError`, `ConcurrentRequestsError`
+- `UnsupportedCapabilityError`, `UnsupportedTranscriptContentError`,
+  `UnsupportedGenerationGuideError`, `UnsupportedLanguageOrLocaleError`
+- `NetworkFailureError`, `QuotaLimitReachedError`, `ServiceUnavailableError`
+  (Private Cloud Compute)
 
 ## Notes
 

@@ -1,0 +1,48 @@
+name: PrivateCloudComputeExample
+
+options:
+  deploymentTarget:
+    macOS: "27.0"
+  xcodeVersion: "27.0"
+
+settings:
+  base:
+    ARCHS: arm64
+    CODE_SIGN_IDENTITY: Apple Development
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_HARDENED_RUNTIME: NO
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    GENERATE_INFOPLIST_FILE: YES
+    MACOSX_DEPLOYMENT_TARGET: "27.0"
+    ONLY_ACTIVE_ARCH: YES
+    SWIFT_VERSION: "6.0"
+
+targets:
+  PrivateCloudComputeExample:
+    type: application
+    platform: macOS
+    sources:
+      - Placeholder/main.swift
+    postBuildScripts:
+      - name: Install Rust executable
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          install -m 755 \
+            "$SRCROOT/../../target/debug/examples/private_cloud_compute" \
+            "$TARGET_BUILD_DIR/$EXECUTABLE_PATH"
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: "$(SRCROOT)/../../crates/fm-rs/examples/private_cloud_compute.entitlements"
+        INFOPLIST_KEY_LSUIElement: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.blacktop.fm-rs.pcc-example
+        PRODUCT_NAME: PrivateCloudComputeExample
+
+schemes:
+  PrivateCloudComputeExample:
+    build:
+      targets:
+        PrivateCloudComputeExample: all
+    run:
+      config: Debug
+      executable: PrivateCloudComputeExample

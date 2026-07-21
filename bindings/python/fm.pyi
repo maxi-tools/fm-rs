@@ -1,7 +1,7 @@
 """Type stubs for the fm module (Apple FoundationModels.framework bindings)."""
 
 from __future__ import annotations
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 from enum import Enum
 
 __version__: str
@@ -37,6 +37,62 @@ class ToolCallError(FmError):
     """Error during tool invocation."""
     ...
 
+class UnsupportedPlatformError(FmError):
+    """The requested API requires a newer Apple platform or SDK."""
+    ...
+
+class NetworkFailureError(FmError):
+    """A Private Cloud Compute request failed due to a network error."""
+    ...
+
+class QuotaLimitReachedError(FmError):
+    """The Private Cloud Compute quota is exhausted until it resets."""
+    ...
+
+class ServiceUnavailableError(FmError):
+    """Private Cloud Compute is temporarily unable to serve requests."""
+    ...
+
+class ContextSizeExceededError(FmError):
+    """The request exceeded the model's context window."""
+    ...
+
+class RateLimitedError(FmError):
+    """The request was rate limited; retry later."""
+    ...
+
+class GuardrailViolationError(FmError):
+    """The request or response was blocked by a safety guardrail."""
+    ...
+
+class RefusalError(FmError):
+    """The model declined to answer the request."""
+    ...
+
+class UnsupportedCapabilityError(FmError):
+    """The request uses a capability this model does not support."""
+    ...
+
+class UnsupportedTranscriptContentError(FmError):
+    """The transcript contains content this model cannot process."""
+    ...
+
+class UnsupportedGenerationGuideError(FmError):
+    """The generation guide or schema is not supported by this model."""
+    ...
+
+class UnsupportedLanguageOrLocaleError(FmError):
+    """The request language or locale is not supported by this model."""
+    ...
+
+class AssetsUnavailableError(FmError):
+    """The on-device model assets are unavailable (e.g. not yet downloaded)."""
+    ...
+
+class ConcurrentRequestsError(FmError):
+    """The session is already responding to another request."""
+    ...
+
 class JsonError(FmError):
     """JSON serialization/deserialization error."""
     ...
@@ -68,6 +124,7 @@ class GenerationOptions:
         sampling: Optional[Sampling] = None,
         max_response_tokens: Optional[int] = None,
         seed: Optional[int] = None,
+        tool_calling_mode: Optional[Literal["allowed", "required", "disallowed"]] = None,
     ) -> None:
         """Creates a new GenerationOptions instance.
 
@@ -76,6 +133,8 @@ class GenerationOptions:
             sampling: Sampling strategy (Greedy or Random).
             max_response_tokens: Maximum number of tokens in the response.
             seed: Random seed for reproducible generation (currently not supported by Apple's API).
+            tool_calling_mode: "allowed", "required", or "disallowed"
+                (macOS/iOS 27+; ignored on older SDKs and runtimes).
         """
         ...
 
@@ -88,12 +147,49 @@ class GenerationOptions:
     @property
     def seed(self) -> Optional[int]: ...
 
+class SessionUsage:
+    """Exact token usage reported by Foundation Models 27."""
+
+    @property
+    def input_tokens(self) -> int: ...
+    @property
+    def cached_input_tokens(self) -> int: ...
+    @property
+    def output_tokens(self) -> int: ...
+    @property
+    def reasoning_tokens(self) -> int: ...
+    def delta_since(self, earlier: SessionUsage) -> SessionUsage:
+        """Returns the usage consumed since an earlier snapshot of this session.
+
+        Raises:
+            ValueError: If any counter went backwards.
+        """
+        ...
+
+class Attachment:
+    """An image attachment for multimodal prompting (macOS/iOS 27+)."""
+
+    @staticmethod
+    def file(path: str, *, label: Optional[str] = None) -> Attachment:
+        """Creates an image attachment from a file path."""
+        ...
+
+    @staticmethod
+    def image_bytes(data: bytes, *, label: Optional[str] = None) -> Attachment:
+        """Creates an image attachment from encoded image bytes (PNG, JPEG, HEIC, ...)."""
+        ...
+
 class Response:
     """Response returned by the model."""
 
     @property
     def content(self) -> str:
         """Gets the text content of the response."""
+        ...
+
+    @property
+    def usage(self) -> Optional[SessionUsage]:
+        """Exact token usage for this response (macOS/iOS 27+), or None."""
         ...
 
     def __str__(self) -> str: ...
@@ -120,6 +216,14 @@ class SystemLanguageModel:
         """Gets the current availability status of the model."""
         ...
 
+    def context_size(self) -> int:
+        """Returns the model context window size in tokens (26.4+ build SDK).
+
+        Raises:
+            UnsupportedPlatformError: If the build SDK cannot report a size.
+        """
+        ...
+
     def ensure_available(self) -> None:
         """Returns an error if the model is unavailable.
 
@@ -140,6 +244,9 @@ class Session:
         *,
         instructions: Optional[str] = None,
         tools: Optional[list[Any]] = None,
+        system_tools: Optional[
+            list[Literal["ocr", "barcode_reader", "spotlight_search"]]
+        ] = None,
     ) -> None:
         """Creates a new session with the given model.
 
@@ -148,9 +255,53 @@ class Session:
             instructions: Optional instructions that define the model's behavior and role.
             tools: Optional list of tool objects. Each tool must have name, description,
                    arguments_schema attributes and a call(args) method.
+            system_tools: Optional list of built-in Apple tool names (macOS/iOS 27+).
 
         Raises:
             FmError: If session creation fails.
+            UnsupportedPlatformError: If system_tools are requested on a
+                pre-27 build SDK or runtime.
+        """
+        ...
+
+    def respond_with_attachments(
+        self,
+        prompt: str,
+        attachments: list[Attachment],
+        options: Optional[GenerationOptions] = None,
+    ) -> Response:
+        """Sends a prompt with image attachments (macOS/iOS 27+).
+
+        Raises:
+            UnsupportedPlatformError: On pre-27 build SDKs or runtimes.
+            UnsupportedCapabilityError: If the model cannot process images.
+        """
+        ...
+
+    def usage(self) -> SessionUsage:
+        """Returns exact cumulative token usage for this session (macOS/iOS 27+).
+
+        Raises:
+            UnsupportedPlatformError: On pre-27 build SDKs or runtimes.
+        """
+        ...
+
+    def set_transcript(self, transcript_json: str) -> None:
+        """Replaces this session's transcript (macOS/iOS 27+).
+
+        Raises:
+            UnsupportedPlatformError: On pre-27 build SDKs or runtimes.
+            ValueError: If the transcript is malformed or the session is responding.
+        """
+        ...
+
+    def set_transcript_error_handling_policy(
+        self, policy: Optional[Literal["revert", "preserve"]]
+    ) -> None:
+        """Sets or clears the transcript error handling policy (macOS/iOS 27+).
+
+        Raises:
+            UnsupportedPlatformError: On pre-27 build SDKs or runtimes.
         """
         ...
 

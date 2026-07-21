@@ -33,6 +33,11 @@ unsafe extern "C" {
     /// Returns null if not available; sets errorOut on failure.
     pub fn fm_model_default(error_out: *mut SwiftPtr) -> SwiftPtr;
 
+    /// Creates a Foundation Models 27 `PrivateCloudComputeLanguageModel`.
+    /// Returns null and sets `error_out` on pre-27 SDKs or runtimes.
+    #[cfg(feature = "private-cloud-compute")]
+    pub fn fm_model_private_cloud_compute(error_out: *mut SwiftPtr) -> SwiftPtr;
+
     /// Checks if the model is available.
     pub fn fm_model_is_available(model: SwiftPtr) -> bool;
 
@@ -60,7 +65,16 @@ unsafe extern "C" {
         error_out: *mut SwiftPtr,
     ) -> i64;
 
-    /// Frees a `SystemLanguageModel`.
+    /// Returns Private Cloud Compute quota usage as a JSON string.
+    /// Returns null and sets `error_out` for models without quota reporting.
+    #[cfg(feature = "private-cloud-compute")]
+    pub fn fm_model_pcc_quota_usage(model: SwiftPtr, error_out: *mut SwiftPtr) -> *mut c_char;
+
+    /// Returns the model context size in tokens.
+    /// Returns -1 and sets `error_out` for models without context-size reporting.
+    pub fn fm_model_context_size(model: SwiftPtr, error_out: *mut SwiftPtr) -> i64;
+
+    /// Frees a language model box.
     pub fn fm_model_free(model: SwiftPtr);
 
     // ========================================================================
@@ -70,11 +84,13 @@ unsafe extern "C" {
     /// Creates a new session with optional instructions and tools.
     /// instructions may be null for no instructions.
     /// `tools_json` may be null for no tools.
+    /// `builtin_tools_json` may be null for no built-in system tools.
     /// `user_data` and `tool_callback` are used for tool invocation.
     pub fn fm_session_create(
         model: SwiftPtr,
         instructions: *const c_char,
         tools_json: *const c_char,
+        builtin_tools_json: *const c_char,
         user_data: *mut c_void,
         tool_callback: ToolCallback,
         error_out: *mut SwiftPtr,
@@ -111,6 +127,27 @@ unsafe extern "C" {
         error_out: *mut SwiftPtr,
     ) -> *mut c_char;
 
+    /// Sends a prompt using a Foundation Models 27 extended-reasoning level.
+    /// `reasoning_level`: 1 = light, 2 = moderate, 3 = deep.
+    pub fn fm_session_respond_with_reasoning(
+        session: SwiftPtr,
+        prompt: *const c_char,
+        options_json: *const c_char,
+        reasoning_level: c_int,
+        error_out: *mut SwiftPtr,
+    ) -> *mut c_char;
+
+    /// Sends a prompt using extended reasoning, with a timeout in milliseconds.
+    /// `reasoning_level`: 1 = light, 2 = moderate, 3 = deep.
+    pub fn fm_session_respond_with_reasoning_timeout(
+        session: SwiftPtr,
+        prompt: *const c_char,
+        options_json: *const c_char,
+        reasoning_level: c_int,
+        timeout_ms: u64,
+        error_out: *mut SwiftPtr,
+    ) -> *mut c_char;
+
     /// Starts streaming a response.
     /// Calls `on_chunk` for each text chunk, `on_done` when complete, `on_error` on failure.
     /// Tool calls are handled internally via the session's `GenericToolBridge`.
@@ -123,6 +160,44 @@ unsafe extern "C" {
         on_done: DoneCallback,
         on_error: ErrorCallback,
     );
+
+    /// Returns cumulative session token usage as JSON (Foundation Models 27).
+    /// Returns null and sets `error_out` on pre-27 SDKs or runtimes.
+    pub fn fm_session_usage(session: SwiftPtr, error_out: *mut SwiftPtr) -> *mut c_char;
+
+    /// Returns the usage recorded for the most recent completed response as
+    /// JSON, or null when none has been recorded.
+    pub fn fm_session_last_response_usage(session: SwiftPtr) -> *mut c_char;
+
+    /// Replaces the session transcript (Foundation Models 27).
+    /// Returns false and sets `error_out` on failure.
+    pub fn fm_session_set_transcript(
+        session: SwiftPtr,
+        transcript_json: *const c_char,
+        error_out: *mut SwiftPtr,
+    ) -> bool;
+
+    /// Sets the transcript error handling policy (Foundation Models 27).
+    /// `policy`: 0 = clear, 1 = revert transcript, 2 = preserve transcript.
+    pub fn fm_session_set_transcript_error_policy(
+        session: SwiftPtr,
+        policy: c_int,
+        error_out: *mut SwiftPtr,
+    ) -> bool;
+
+    /// Sends a prompt with image attachments (Foundation Models 27).
+    /// `attachments_json` describes each attachment; data attachments reference
+    /// entries in the parallel `buffers`/`buffer_lens` arrays by index.
+    pub fn fm_session_respond_with_attachments(
+        session: SwiftPtr,
+        prompt: *const c_char,
+        options_json: *const c_char,
+        attachments_json: *const c_char,
+        buffers: *const *const u8,
+        buffer_lens: *const usize,
+        buffer_count: c_int,
+        error_out: *mut SwiftPtr,
+    ) -> *mut c_char;
 
     /// Cancels an ongoing stream operation.
     pub fn fm_session_cancel(session: SwiftPtr);
@@ -209,6 +284,7 @@ pub enum AvailabilityCode {
     AppleIntelligenceNotEnabled = 2,
     ModelNotReady = 3,
     Unknown = 4,
+    PrivateCloudComputeSystemNotReady = 5,
 }
 
 impl From<c_int> for AvailabilityCode {
@@ -218,6 +294,7 @@ impl From<c_int> for AvailabilityCode {
             1 => AvailabilityCode::DeviceNotEligible,
             2 => AvailabilityCode::AppleIntelligenceNotEnabled,
             3 => AvailabilityCode::ModelNotReady,
+            5 => AvailabilityCode::PrivateCloudComputeSystemNotReady,
             _ => AvailabilityCode::Unknown,
         }
     }
@@ -234,6 +311,20 @@ pub enum ErrorCode {
     ToolError = 4,
     InvalidInput = 5,
     Timeout = 6,
+    UnsupportedPlatform = 7,
+    NetworkFailure = 8,
+    QuotaLimitReached = 9,
+    ServiceUnavailable = 10,
+    ContextSizeExceeded = 11,
+    RateLimited = 12,
+    GuardrailViolation = 13,
+    Refusal = 14,
+    UnsupportedCapability = 15,
+    UnsupportedTranscriptContent = 16,
+    UnsupportedGenerationGuide = 17,
+    UnsupportedLanguageOrLocale = 18,
+    AssetsUnavailable = 19,
+    ConcurrentRequests = 20,
 }
 
 impl From<c_int> for ErrorCode {
@@ -245,6 +336,20 @@ impl From<c_int> for ErrorCode {
             4 => ErrorCode::ToolError,
             5 => ErrorCode::InvalidInput,
             6 => ErrorCode::Timeout,
+            7 => ErrorCode::UnsupportedPlatform,
+            8 => ErrorCode::NetworkFailure,
+            9 => ErrorCode::QuotaLimitReached,
+            10 => ErrorCode::ServiceUnavailable,
+            11 => ErrorCode::ContextSizeExceeded,
+            12 => ErrorCode::RateLimited,
+            13 => ErrorCode::GuardrailViolation,
+            14 => ErrorCode::Refusal,
+            15 => ErrorCode::UnsupportedCapability,
+            16 => ErrorCode::UnsupportedTranscriptContent,
+            17 => ErrorCode::UnsupportedGenerationGuide,
+            18 => ErrorCode::UnsupportedLanguageOrLocale,
+            19 => ErrorCode::AssetsUnavailable,
+            20 => ErrorCode::ConcurrentRequests,
             _ => ErrorCode::Unknown,
         }
     }

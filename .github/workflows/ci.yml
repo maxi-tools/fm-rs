@@ -82,6 +82,10 @@ jobs:
   python-bindings:
     name: Python Bindings
     runs-on: macos-26
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      # rust-lang/rust#157750: avoid malformed stripped Mach-O string tables.
+      CARGO_PROFILE_RELEASE_STRIP: none
     steps:
       - uses: actions/checkout@v6
 

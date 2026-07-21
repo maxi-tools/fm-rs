@@ -124,12 +124,12 @@ pub(crate) fn tools_to_json(tools: &[&dyn Tool]) -> crate::error::Result<String>
                 "Tool '{name}' arguments schema must be a JSON object"
             ))
         })?;
-        if let Some(Value::String(ty)) = schema_obj.get("type") {
-            if ty != "object" {
-                return Err(crate::error::Error::InvalidInput(format!(
-                    "Tool '{name}' arguments schema must have type \"object\""
-                )));
-            }
+        if let Some(Value::String(ty)) = schema_obj.get("type")
+            && ty != "object"
+        {
+            return Err(crate::error::Error::InvalidInput(format!(
+                "Tool '{name}' arguments schema must have type \"object\""
+            )));
         }
 
         definitions.push(ToolDefinition {
@@ -179,8 +179,10 @@ impl ToolResult {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
+
+    use crate::error::Result;
+    use crate::tool::{Tool, ToolDefinition, ToolOutput, ToolResult, tools_to_json};
 
     struct TestTool;
 

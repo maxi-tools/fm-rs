@@ -33,7 +33,9 @@ Issues = "https://github.com/blacktop/fm-rs/issues"
 [tool.maturin]
 features = ["pyo3/extension-module"]
 module-name = "fm"
-strip = true
+# rust-lang/rust#157750: Rust 1.97's LLVM objcopy can produce a misaligned Mach-O
+# string table when stripping; Cargo is also overridden in .cargo/config.toml.
+strip = false
 
 [dependency-groups]
 dev = [

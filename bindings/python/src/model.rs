@@ -31,7 +31,7 @@ impl From<fm_rs::ModelAvailability> for ModelAvailability {
                 ModelAvailability::AppleIntelligenceNotEnabled
             }
             fm_rs::ModelAvailability::ModelNotReady => ModelAvailability::ModelNotReady,
-            fm_rs::ModelAvailability::Unknown => ModelAvailability::Unknown,
+            _ => ModelAvailability::Unknown,
         }
     }
 }
@@ -90,13 +90,28 @@ impl SystemLanguageModel {
         self.inner.ensure_available().map_err(to_py_err)
     }
 
+    /// Returns the model context window size in tokens.
+    ///
+    /// Requires building fm-rs with the macOS/iOS 26.4 SDK or later; older
+    /// build SDKs raise `UnsupportedPlatformError`. Pre-27 runtimes report
+    /// the back-deployed default of 4096 tokens.
+    ///
+    /// Returns:
+    ///     int: The context window size in tokens.
+    ///
+    /// Raises:
+    ///     `UnsupportedPlatformError`: If the build SDK cannot report a size.
+    fn context_size(&self) -> PyResult<u64> {
+        self.inner.context_size().map_err(to_py_err)
+    }
+
     fn __repr__(&self) -> String {
         let avail = match self.inner.availability() {
             fm_rs::ModelAvailability::Available => "Available",
             fm_rs::ModelAvailability::DeviceNotEligible => "DeviceNotEligible",
             fm_rs::ModelAvailability::AppleIntelligenceNotEnabled => "AppleIntelligenceNotEnabled",
             fm_rs::ModelAvailability::ModelNotReady => "ModelNotReady",
-            fm_rs::ModelAvailability::Unknown => "Unknown",
+            _ => "Unknown",
         };
         format!("SystemLanguageModel(availability={avail})")
     }

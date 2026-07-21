@@ -7,11 +7,14 @@ use crate::model::SystemLanguageModel;
 use crate::options::GenerationOptions;
 use crate::session::Session;
 
-/// Default context window size for Apple's on-device Foundation Models.
+/// Conservative fallback context window size for Apple's on-device models.
 ///
-/// This value is based on observed behavior during WWDC 2025 sessions and early
-/// developer testing. Apple has not officially documented the context window size.
-/// The actual limit may vary by device, model version, or available memory.
+/// Since the 26.4 SDK, the authoritative value is
+/// `SystemLanguageModel::context_size()`; pre-27 runtimes report the
+/// back-deployed default of 4096 tokens, while macOS/iOS 27 hardware can
+/// report larger windows. Prefer [`ContextLimit::for_model`], which queries
+/// the model and only falls back to this constant when the build SDK cannot
+/// report a size.
 ///
 /// For production use, monitor [`ContextUsage::utilization`] and implement
 /// compaction strategies when approaching the limit.
@@ -38,7 +41,38 @@ impl ContextLimit {
         }
     }
 
+    /// Creates a configuration from the model-reported context size.
+    ///
+    /// Falls back to [`DEFAULT_CONTEXT_TOKENS`] only when the build SDK
+    /// cannot report a size ([`crate::Error::UnsupportedPlatform`]). Other
+    /// failures — such as Private Cloud Compute network or quota errors —
+    /// are propagated rather than silently mapped to a fake limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns any non-platform error from `context_size()`, or an internal
+    /// error if the reported size does not fit in `usize`.
+    pub fn for_model<M: crate::model::LanguageModel + ?Sized>(model: &M) -> Result<Self> {
+        let max_tokens = match model.context_size() {
+            Ok(tokens) => usize::try_from(tokens).map_err(|_| {
+                crate::error::Error::InternalError(format!(
+                    "Model context size {tokens} does not fit in usize"
+                ))
+            })?,
+            Err(crate::error::Error::UnsupportedPlatform(_)) => DEFAULT_CONTEXT_TOKENS,
+            Err(err) => return Err(err),
+        };
+        Ok(Self {
+            max_tokens,
+            reserved_response_tokens: 512,
+            chars_per_token: 4,
+        })
+    }
+
     /// Creates a default configuration for on-device models.
+    ///
+    /// This uses the conservative [`DEFAULT_CONTEXT_TOKENS`] fallback;
+    /// prefer [`ContextLimit::for_model`] when a model handle is available.
     pub fn default_on_device() -> Self {
         Self {
             max_tokens: DEFAULT_CONTEXT_TOKENS,
@@ -370,7 +404,7 @@ fn collect_transcript_lines(value: &Value, out: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::context::{chunk_text, compacted_instructions, estimate_tokens};
 
     #[test]
     fn test_estimate_tokens() {

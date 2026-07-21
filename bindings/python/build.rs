@@ -18,7 +18,8 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{swift_lib_path}");
     }
 
-    // Also add rpath for system Swift libraries (needed for Swift Concurrency)
+    // Cargo does not load bindings/python/.cargo/config.toml when invoked from
+    // the workspace root, so the Python test harness needs this rpath here.
     println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
 }
 

@@ -3,15 +3,15 @@ resolver = "3"
 members = ["crates/*", "bindings/*"]
 
 [workspace.package]
-version = "0.1.5"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/blacktop/fm-rs"
 
 [workspace.dependencies]
 # Internal crates
-fm-rs = { path = "crates/fm-rs", version = "0.1.5" }
-fm-rs-derive = { path = "crates/fm-rs-derive", version = "0.1.5" }
+fm-rs = { path = "crates/fm-rs", version = "0.2.0" }
+fm-rs-derive = { path = "crates/fm-rs-derive", version = "0.2.0" }
 
 # Shared dependencies
 serde = { version = "1", features = ["derive"] }
@@ -23,7 +23,7 @@ quote = "1"
 syn = { version = "3", features = ["full"] }
 
 # Dev dependencies
-reqwest = { version = "0.13", features = ["blocking", "json"] }
+reqwest = { version = "0.13", features = ["blocking", "json", "query"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

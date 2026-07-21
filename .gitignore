@@ -21,6 +21,7 @@ target
 #.idea/
 
 # Swift build artifacts
+xcode/PrivateCloudComputeExample/*.xcodeproj/
 *.o
 *.a
 *.dylib

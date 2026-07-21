@@ -13,6 +13,43 @@ pub enum Sampling {
     Random,
 }
 
+/// Extended-reasoning effort for Foundation Models 27 requests.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningLevel {
+    /// Minimize reasoning latency and compute.
+    Light,
+    /// Balance reasoning quality with latency.
+    Moderate,
+    /// Spend the most effort on complex reasoning.
+    Deep,
+}
+
+impl ReasoningLevel {
+    pub(crate) fn as_ffi_code(self) -> i32 {
+        match self {
+            Self::Light => 1,
+            Self::Moderate => 2,
+            Self::Deep => 3,
+        }
+    }
+}
+
+/// Controls whether the model may, must, or must not call tools
+/// (Foundation Models 27).
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolCallingMode {
+    /// The model decides when to call tools (framework default).
+    Allowed,
+    /// The model must call a tool before responding. Apple warns that this
+    /// mode needs an explicit exit condition to avoid unbounded loops.
+    Required,
+    /// The model must answer from current context without calling tools.
+    Disallowed,
+}
+
 /// Options that control how the model generates its response.
 ///
 /// Use the builder pattern to configure options:
@@ -47,6 +84,14 @@ pub struct GenerationOptions {
     /// and is ignored. It is included for potential future use.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
+
+    /// Tool-calling mode (Foundation Models 27).
+    ///
+    /// Ignored on pre-27 build SDKs and runtimes, where the framework
+    /// behaves as [`ToolCallingMode::Allowed`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "toolCallingMode")]
+    pub tool_calling_mode: Option<ToolCallingMode>,
 }
 
 impl GenerationOptions {
@@ -68,6 +113,7 @@ pub struct GenerationOptionsBuilder {
     sampling: Option<Sampling>,
     max_response_tokens: Option<u32>,
     seed: Option<u64>,
+    tool_calling_mode: Option<ToolCallingMode>,
 }
 
 impl GenerationOptionsBuilder {
@@ -131,6 +177,14 @@ impl GenerationOptionsBuilder {
         self
     }
 
+    /// Sets the tool-calling mode (Foundation Models 27).
+    ///
+    /// Ignored on pre-27 build SDKs and runtimes.
+    pub fn tool_calling_mode(mut self, mode: ToolCallingMode) -> Self {
+        self.tool_calling_mode = Some(mode);
+        self
+    }
+
     /// Builds the [`GenerationOptions`].
     pub fn build(self) -> GenerationOptions {
         GenerationOptions {
@@ -138,13 +192,14 @@ impl GenerationOptionsBuilder {
             sampling: self.sampling,
             max_response_tokens: self.max_response_tokens,
             seed: self.seed,
+            tool_calling_mode: self.tool_calling_mode,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::options::{GenerationOptions, ReasoningLevel, Sampling, ToolCallingMode};
 
     #[test]
     fn test_default_options() {
@@ -194,5 +249,25 @@ mod tests {
         let json = options.to_json();
         assert!(json.contains("temperature"));
         assert!(json.contains("0.7"));
+    }
+
+    #[test]
+    fn tool_calling_mode_serializes_with_stable_names() {
+        let options = GenerationOptions::builder()
+            .tool_calling_mode(ToolCallingMode::Required)
+            .build();
+        assert_eq!(options.to_json(), r#"{"toolCallingMode":"required"}"#);
+
+        let options = GenerationOptions::builder()
+            .tool_calling_mode(ToolCallingMode::Disallowed)
+            .build();
+        assert!(options.to_json().contains("disallowed"));
+    }
+
+    #[test]
+    fn reasoning_levels_have_stable_ffi_codes() {
+        assert_eq!(ReasoningLevel::Light.as_ffi_code(), 1);
+        assert_eq!(ReasoningLevel::Moderate.as_ffi_code(), 2);
+        assert_eq!(ReasoningLevel::Deep.as_ffi_code(), 3);
     }
 }

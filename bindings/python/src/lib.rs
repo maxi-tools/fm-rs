@@ -41,9 +41,11 @@ fn fm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<options::Sampling>()?;
     m.add_class::<options::GenerationOptions>()?;
     m.add_class::<response::Response>()?;
+    m.add_class::<response::SessionUsage>()?;
     m.add_class::<model::ModelAvailability>()?;
     m.add_class::<model::SystemLanguageModel>()?;
     m.add_class::<session::Session>()?;
+    m.add_class::<session::Attachment>()?;
     m.add_class::<tool::ToolOutput>()?;
     m.add_class::<context::ContextLimit>()?;
     m.add_class::<context::ContextUsage>()?;

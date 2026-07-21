@@ -9,7 +9,7 @@ import FoundationModels
 
 // MARK: - Error Codes
 
-private enum FFIErrorCode: Int32 {
+enum FFIErrorCode: Int32 {
     case unknown = 0
     case modelNotAvailable = 1
     case generationFailed = 2
@@ -17,6 +17,20 @@ private enum FFIErrorCode: Int32 {
     case toolError = 4
     case invalidInput = 5
     case timeout = 6
+    case unsupportedPlatform = 7
+    case networkFailure = 8
+    case quotaLimitReached = 9
+    case serviceUnavailable = 10
+    case contextSizeExceeded = 11
+    case rateLimited = 12
+    case guardrailViolation = 13
+    case refusal = 14
+    case unsupportedCapability = 15
+    case unsupportedTranscriptContent = 16
+    case unsupportedGenerationGuide = 17
+    case unsupportedLanguageOrLocale = 18
+    case assetsUnavailable = 19
+    case concurrentRequests = 20
 }
 
 let tokenUsageUnavailableSentinel: Int64 = -2
@@ -31,6 +45,27 @@ typealias ToolCallbackFn = @convention(c) (
     UnsafePointer<CChar>?,
     UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+
+public typealias StreamChunkCallbackFn = @Sendable @convention(c) (
+    UnsafeMutableRawPointer?,
+    UnsafePointer<CChar>?
+) -> Void
+public typealias StreamDoneCallbackFn = @Sendable @convention(c) (UnsafeMutableRawPointer?) -> Void
+public typealias StreamErrorCallbackFn = @Sendable @convention(c) (
+    UnsafeMutableRawPointer?,
+    Int32,
+    UnsafePointer<CChar>?
+) -> Void
+
+/// The Rust caller keeps `userData` alive until the synchronous stream FFI
+/// function returns. Bundling it with Sendable C function pointers makes that
+/// lifetime contract explicit when the callbacks move into a detached task.
+private struct StreamCallbackContext: @unchecked Sendable {
+    let userData: UnsafeMutableRawPointer?
+    let onChunk: StreamChunkCallbackFn
+    let onDone: StreamDoneCallbackFn
+    let onError: StreamErrorCallbackFn
+}
 
 // MARK: - Error Handling
 
@@ -87,7 +122,7 @@ public func fm_error_free(_ errorPtr: UnsafeMutableRawPointer?) {
 }
 
 /// Creates an error object.
-private func createError(_ message: String, code: FFIErrorCode, toolName: String? = nil, toolArguments: String? = nil) -> UnsafeMutableRawPointer {
+func createError(_ message: String, code: FFIErrorCode, toolName: String? = nil, toolArguments: String? = nil) -> UnsafeMutableRawPointer {
     let errorInfo = ErrorInfo(message: message, code: code.rawValue, toolName: toolName, toolArguments: toolArguments)
     return Unmanaged.passRetained(errorInfo as AnyObject).toOpaque()
 }
@@ -103,9 +138,70 @@ private func createErrorFromException(_ error: Error, defaultCode: FFIErrorCode 
         )
     } else if let timeoutError = error as? TimeoutError {
         return createError(timeoutError.message, code: .timeout)
+    } else if let (code, message) = classifyPlatformError(error) {
+        return createError(message, code: code)
     } else {
         return createError(error.localizedDescription, code: defaultCode)
     }
+}
+
+/// Maps platform error types onto stable FFI codes: PCC errors first, the
+/// Foundation Models 27 taxonomy second, and the 26-era `GenerationError`
+/// cases (still thrown by macOS/iOS 26 runtimes) last.
+func classifyPlatformError(_ error: Error) -> (FFIErrorCode, String)? {
+    classifyPrivateCloudComputeError(error)
+        ?? classifyLanguageModelError(error)
+        ?? classifyLegacyGenerationError(error)
+}
+
+// MARK: - Legacy (Foundation Models 26) Error Classification
+
+private protocol LegacyGenerationErrorClassifying {
+    func classify(_ error: Error) -> (FFIErrorCode, String)?
+}
+
+private struct LegacyGenerationErrorClassifier: LegacyGenerationErrorClassifying {}
+
+// The 26-era cases are deprecated on 27 SDKs. Implementing the classification
+// inside an extension that is itself deprecated compiles without deprecation
+// warnings; callers route through the non-deprecated protocol requirement.
+@available(*, deprecated, message: "Bridges the deprecated Foundation Models 26 GenerationError cases")
+extension LegacyGenerationErrorClassifier {
+    func classify(_ error: Error) -> (FFIErrorCode, String)? {
+        guard let generationError = error as? LanguageModelSession.GenerationError else {
+            return nil
+        }
+
+        let base = generationError.errorDescription
+        switch generationError {
+        case .exceededContextWindowSize(let context):
+            return (.contextSizeExceeded, base ?? context.debugDescription)
+        case .assetsUnavailable(let context):
+            return (.assetsUnavailable, base ?? context.debugDescription)
+        case .guardrailViolation(let context):
+            return (.guardrailViolation, base ?? context.debugDescription)
+        case .unsupportedGuide(let context):
+            return (.unsupportedGenerationGuide, base ?? context.debugDescription)
+        case .unsupportedLanguageOrLocale(let context):
+            return (.unsupportedLanguageOrLocale, base ?? context.debugDescription)
+        case .decodingFailure(let context):
+            return (.generationFailed, base ?? context.debugDescription)
+        case .rateLimited(let context):
+            return (.rateLimited, base ?? context.debugDescription)
+        case .concurrentRequests(let context):
+            return (.concurrentRequests, base ?? context.debugDescription)
+        case .refusal(_, let context):
+            return (.refusal, base ?? context.debugDescription)
+        @unknown default:
+            return (.generationFailed, generationError.localizedDescription)
+        }
+    }
+}
+
+/// Bridges 26-era `GenerationError` values thrown by macOS/iOS 26 runtimes.
+func classifyLegacyGenerationError(_ error: Error) -> (FFIErrorCode, String)? {
+    let classifier: any LegacyGenerationErrorClassifying = LegacyGenerationErrorClassifier()
+    return classifier.classify(error)
 }
 
 func createGenerationErrorFromException(_ error: Error) -> UnsafeMutableRawPointer {
@@ -114,25 +210,54 @@ func createGenerationErrorFromException(_ error: Error) -> UnsafeMutableRawPoint
 
 // MARK: - SystemLanguageModel
 
-/// Creates the default SystemLanguageModel.
-@_cdecl("fm_model_default")
-public func fm_model_default(_ errorOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>?) -> UnsafeMutableRawPointer? {
-    let model = SystemLanguageModel.default
-    return Unmanaged.passRetained(model as AnyObject).toOpaque()
+/// Type-erased language model storage shared by the Rust-facing FFI.
+///
+/// Foundation Models 26 only accepts `SystemLanguageModel`, while Foundation
+/// Models 27 adds the public `LanguageModel` protocol and PCC model. Keeping the
+/// concrete model inside closures lets this common source continue to compile
+/// with the 26 SDK while a separate 27-only source supplies PCC closures.
+final class LanguageModelBox: @unchecked Sendable {
+    let systemModel: SystemLanguageModel?
+    private let isAvailableHandler: () -> Bool
+    private let availabilityHandler: () -> Int32
+    private let sessionFactory: ([any Tool], Instructions?) -> LanguageModelSession
+    private let transcriptSessionFactory: ([any Tool], Transcript) -> LanguageModelSession
+    /// Returns quota usage as JSON; nil when the model has no quota concept.
+    let quotaUsageJson: (() -> String?)?
+    /// Returns the model context size in tokens; nil when unsupported.
+    let contextSize: (() throws -> Int64)?
+
+    init(
+        systemModel: SystemLanguageModel? = nil,
+        isAvailable: @escaping () -> Bool,
+        availability: @escaping () -> Int32,
+        makeSession: @escaping ([any Tool], Instructions?) -> LanguageModelSession,
+        makeTranscriptSession: @escaping ([any Tool], Transcript) -> LanguageModelSession,
+        quotaUsageJson: (() -> String?)? = nil,
+        contextSize: (() throws -> Int64)? = nil
+    ) {
+        self.systemModel = systemModel
+        isAvailableHandler = isAvailable
+        availabilityHandler = availability
+        sessionFactory = makeSession
+        transcriptSessionFactory = makeTranscriptSession
+        self.quotaUsageJson = quotaUsageJson
+        self.contextSize = contextSize
+    }
+
+    var isAvailable: Bool { isAvailableHandler() }
+    var availabilityCode: Int32 { availabilityHandler() }
+
+    func makeSession(tools: [any Tool], instructions: Instructions?) -> LanguageModelSession {
+        sessionFactory(tools, instructions)
+    }
+
+    func makeSession(tools: [any Tool], transcript: Transcript) -> LanguageModelSession {
+        transcriptSessionFactory(tools, transcript)
+    }
 }
 
-/// Checks if the model is available.
-@_cdecl("fm_model_is_available")
-public func fm_model_is_available(_ modelPtr: UnsafeMutableRawPointer) -> Bool {
-    let model = Unmanaged<AnyObject>.fromOpaque(modelPtr).takeUnretainedValue() as! SystemLanguageModel
-    return model.isAvailable
-}
-
-/// Gets the availability status as an integer.
-@_cdecl("fm_model_availability")
-public func fm_model_availability(_ modelPtr: UnsafeMutableRawPointer) -> Int32 {
-    let model = Unmanaged<AnyObject>.fromOpaque(modelPtr).takeUnretainedValue() as! SystemLanguageModel
-
+private func systemModelAvailabilityCode(_ model: SystemLanguageModel) -> Int32 {
     switch model.availability {
     case .available:
         return 0
@@ -147,7 +272,90 @@ public func fm_model_availability(_ modelPtr: UnsafeMutableRawPointer) -> Int32 
     }
 }
 
-/// Frees a SystemLanguageModel.
+private func makeSystemLanguageModelBox() -> LanguageModelBox {
+    let model = SystemLanguageModel.default
+    return LanguageModelBox(
+        systemModel: model,
+        isAvailable: { model.isAvailable },
+        availability: { systemModelAvailabilityCode(model) },
+        makeSession: { tools, instructions in
+            LanguageModelSession(model: model, tools: tools, instructions: instructions)
+        },
+        makeTranscriptSession: { tools, transcript in
+            LanguageModelSession(model: model, tools: tools, transcript: transcript)
+        },
+        contextSize: systemModelContextSizeHandler(model)
+    )
+}
+
+/// Creates the default SystemLanguageModel.
+@_cdecl("fm_model_default")
+public func fm_model_default(_ errorOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>?) -> UnsafeMutableRawPointer? {
+    _ = errorOut
+    let model = makeSystemLanguageModelBox()
+    return Unmanaged.passRetained(model as AnyObject).toOpaque()
+}
+
+/// Checks if the model is available.
+@_cdecl("fm_model_is_available")
+public func fm_model_is_available(_ modelPtr: UnsafeMutableRawPointer) -> Bool {
+    let model = Unmanaged<AnyObject>.fromOpaque(modelPtr).takeUnretainedValue() as! LanguageModelBox
+    return model.isAvailable
+}
+
+/// Gets the availability status as an integer.
+@_cdecl("fm_model_availability")
+public func fm_model_availability(_ modelPtr: UnsafeMutableRawPointer) -> Int32 {
+    let model = Unmanaged<AnyObject>.fromOpaque(modelPtr).takeUnretainedValue() as! LanguageModelBox
+    return model.availabilityCode
+}
+
+/// Returns quota usage as a JSON string for models with a usage quota.
+/// Sets `errorOut` and returns null for models without quota reporting.
+@_cdecl("fm_model_pcc_quota_usage")
+public func fm_model_pcc_quota_usage(
+    _ modelPtr: UnsafeMutableRawPointer,
+    _ errorOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>?
+) -> UnsafeMutablePointer<CChar>? {
+    let model = Unmanaged<AnyObject>.fromOpaque(modelPtr).takeUnretainedValue() as! LanguageModelBox
+    guard let quotaUsageJson = model.quotaUsageJson else {
+        errorOut?.pointee = createError(
+            "Quota usage requires a PrivateCloudComputeLanguageModel on macOS/iOS 27.0 or later",
+            code: .unsupportedPlatform
+        )
+        return nil
+    }
+    guard let json = quotaUsageJson() else {
+        errorOut?.pointee = createError("Failed to encode quota usage", code: .unknown)
+        return nil
+    }
+    return strdup(json)
+}
+
+/// Returns the model context size in tokens.
+/// Sets `errorOut` and returns -1 for models without context-size reporting.
+@_cdecl("fm_model_context_size")
+public func fm_model_context_size(
+    _ modelPtr: UnsafeMutableRawPointer,
+    _ errorOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>?
+) -> Int64 {
+    let model = Unmanaged<AnyObject>.fromOpaque(modelPtr).takeUnretainedValue() as! LanguageModelBox
+    guard let contextSize = model.contextSize else {
+        errorOut?.pointee = createError(
+            "Context size reporting requires building with the macOS/iOS 26.4 SDK or later",
+            code: .unsupportedPlatform
+        )
+        return -1
+    }
+    do {
+        return try contextSize()
+    } catch {
+        errorOut?.pointee = createErrorFromException(error)
+        return -1
+    }
+}
+
+/// Frees a language model box.
 @_cdecl("fm_model_free")
 public func fm_model_free(_ modelPtr: UnsafeMutableRawPointer?) {
     guard let modelPtr = modelPtr else { return }
@@ -481,15 +689,29 @@ private struct ToolDefinitionError: Error {
 // MARK: - Session State
 
 /// Session state container for FFI with tools support
-private final class SessionState: @unchecked Sendable {
+final class SessionState: @unchecked Sendable {
     let session: LanguageModelSession
     let toolDispatcher: ToolDispatcher?
     var currentTask: Task<Void, Never>?
     private let lock = NSLock()
+    private var lastResponseUsageJsonStorage: String?
 
     init(session: LanguageModelSession, toolDispatcher: ToolDispatcher? = nil) {
         self.session = session
         self.toolDispatcher = toolDispatcher
+    }
+
+    /// Records per-response usage; nil clears it (fallback builds/runtimes).
+    func setLastResponseUsage(_ json: String?) {
+        lock.lock()
+        defer { lock.unlock() }
+        lastResponseUsageJsonStorage = json
+    }
+
+    var lastResponseUsageJson: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return lastResponseUsageJsonStorage
     }
 
     func setTask(_ task: Task<Void, Never>?) {
@@ -518,11 +740,30 @@ public func fm_session_create(
     _ modelPtr: UnsafeMutableRawPointer,
     _ instructions: UnsafePointer<CChar>?,
     _ toolsJson: UnsafePointer<CChar>?,
+    _ builtinToolsJson: UnsafePointer<CChar>?,
     _ userData: UnsafeMutableRawPointer?,
     _ toolCallback: @escaping @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?,
     _ errorOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>?
 ) -> UnsafeMutableRawPointer? {
-    let model = Unmanaged<AnyObject>.fromOpaque(modelPtr).takeUnretainedValue() as! SystemLanguageModel
+    let model = Unmanaged<AnyObject>.fromOpaque(modelPtr).takeUnretainedValue() as! LanguageModelBox
+
+    // Parse built-in system tool names
+    let builtinToolNames: [String]
+    if let builtinToolsJson {
+        let jsonString = String(cString: builtinToolsJson)
+        guard let jsonData = jsonString.data(using: .utf8),
+              let names = try? JSONDecoder().decode([String].self, from: jsonData)
+        else {
+            errorOut?.pointee = createError("Invalid built-in tools JSON", code: .invalidInput)
+            return nil
+        }
+        builtinToolNames = names
+    } else {
+        builtinToolNames = []
+    }
+    guard let builtinTools = makeBuiltinTools(builtinToolNames, errorOut: errorOut) else {
+        return nil
+    }
 
     // Parse instructions
     let instructionsValue: Instructions?
@@ -562,21 +803,8 @@ public func fm_session_create(
         toolBridge = nil
     }
 
-    // Create session with tool bridge if tools are defined
-    let session: LanguageModelSession
-    if let bridge = toolBridge {
-        if let instructionsValue = instructionsValue {
-            session = LanguageModelSession(model: model, tools: [bridge], instructions: instructionsValue)
-        } else {
-            session = LanguageModelSession(model: model, tools: [bridge])
-        }
-    } else {
-        if let instructionsValue = instructionsValue {
-            session = LanguageModelSession(model: model, instructions: instructionsValue)
-        } else {
-            session = LanguageModelSession(model: model)
-        }
-    }
+    let sessionTools: [any Tool] = (toolBridge.map { [$0] } ?? []) + builtinTools
+    let session = model.makeSession(tools: sessionTools, instructions: instructionsValue)
 
     let state = SessionState(session: session, toolDispatcher: toolDispatcher)
     return Unmanaged.passRetained(state as AnyObject).toOpaque()
@@ -589,7 +817,7 @@ public func fm_session_from_transcript(
     _ transcriptJson: UnsafePointer<CChar>,
     _ errorOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>?
 ) -> UnsafeMutableRawPointer? {
-    let model = Unmanaged<AnyObject>.fromOpaque(modelPtr).takeUnretainedValue() as! SystemLanguageModel
+    let model = Unmanaged<AnyObject>.fromOpaque(modelPtr).takeUnretainedValue() as! LanguageModelBox
     let jsonString = String(cString: transcriptJson)
 
     guard let jsonData = jsonString.data(using: .utf8) else {
@@ -601,7 +829,7 @@ public func fm_session_from_transcript(
 
     do {
         let transcript = try JSONDecoder().decode(Transcript.self, from: jsonData)
-        let session = LanguageModelSession(model: model, transcript: transcript)
+        let session = model.makeSession(tools: [], transcript: transcript)
         let state = SessionState(session: session)
         return Unmanaged.passRetained(state as AnyObject).toOpaque()
     } catch {
@@ -635,11 +863,12 @@ public func fm_session_respond(
     let options = parseGenerationOptions(optionsJson)
 
     do {
-        let content = try AsyncWaiter.wait {
+        let (content, usageJson) = try AsyncWaiter.wait {
             let response = try await state.session.respond(to: promptString, options: options)
-            return response.content
+            return (response.content, responseUsageJson(response))
         }
 
+        state.setLastResponseUsage(usageJson)
         return strdup(content)
     } catch {
         if let errorOut = errorOut {
@@ -663,11 +892,12 @@ public func fm_session_respond_with_timeout(
     let options = parseGenerationOptions(optionsJson)
 
     do {
-        let content = try AsyncWaiter.wait(timeoutMs: timeoutMs) {
+        let (content, usageJson) = try AsyncWaiter.wait(timeoutMs: timeoutMs) {
             let response = try await state.session.respond(to: promptString, options: options)
-            return response.content
+            return (response.content, responseUsageJson(response))
         }
 
+        state.setLastResponseUsage(usageJson)
         return strdup(content)
     } catch {
         if let errorOut = errorOut {
@@ -689,15 +919,21 @@ public func fm_session_stream(
     _ prompt: UnsafePointer<CChar>,
     _ optionsJson: UnsafePointer<CChar>?,
     _ userData: UnsafeMutableRawPointer?,
-    _ onChunk: @escaping @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void,
-    _ onDone: @escaping @convention(c) (UnsafeMutableRawPointer?) -> Void,
-    _ onError: @escaping @convention(c) (UnsafeMutableRawPointer?, Int32, UnsafePointer<CChar>?) -> Void
+    _ onChunk: @escaping StreamChunkCallbackFn,
+    _ onDone: @escaping StreamDoneCallbackFn,
+    _ onError: @escaping StreamErrorCallbackFn
 ) {
     let state = Unmanaged<AnyObject>.fromOpaque(sessionPtr).takeUnretainedValue() as! SessionState
     let promptString = String(cString: prompt)
     let options = parseGenerationOptions(optionsJson)
 
     let callbackQueue = DispatchQueue(label: "fm.ffi.callbacks", qos: .userInteractive)
+    let callbacks = StreamCallbackContext(
+        userData: userData,
+        onChunk: onChunk,
+        onDone: onDone,
+        onError: onError
+    )
     let semaphore = DispatchSemaphore(value: 0)
 
     let task = Task.detached {
@@ -708,14 +944,18 @@ public func fm_session_stream(
                 let content = partialResponse.content
                 callbackQueue.sync {
                     content.withCString { ptr in
-                        onChunk(userData, ptr)
+                        callbacks.onChunk(callbacks.userData, ptr)
                     }
                 }
 
                 if Task.isCancelled {
                     callbackQueue.sync {
                         "Cancelled".withCString { ptr in
-                            onError(userData, FFIErrorCode.cancelled.rawValue, ptr)
+                            callbacks.onError(
+                                callbacks.userData,
+                                FFIErrorCode.cancelled.rawValue,
+                                ptr
+                            )
                         }
                     }
                     semaphore.signal()
@@ -724,7 +964,7 @@ public func fm_session_stream(
             }
 
             callbackQueue.sync {
-                onDone(userData)
+                callbacks.onDone(callbacks.userData)
             }
         } catch {
             callbackQueue.sync {
@@ -738,12 +978,15 @@ public func fm_session_stream(
                     }
                     errorCode = FFIErrorCode.toolError.rawValue
                     errorMessage = msg
+                } else if let (code, message) = classifyPlatformError(error) {
+                    errorCode = code.rawValue
+                    errorMessage = message
                 } else {
                     errorCode = FFIErrorCode.generationFailed.rawValue
                     errorMessage = error.localizedDescription
                 }
                 errorMessage.withCString { ptr in
-                    onError(userData, errorCode, ptr)
+                    callbacks.onError(callbacks.userData, errorCode, ptr)
                 }
             }
         }
@@ -761,6 +1004,18 @@ public func fm_session_stream(
 public func fm_session_cancel(_ sessionPtr: UnsafeMutableRawPointer) {
     let state = Unmanaged<AnyObject>.fromOpaque(sessionPtr).takeUnretainedValue() as! SessionState
     state.cancelCurrentTask()
+}
+
+/// Returns the usage recorded for the most recent completed response, or
+/// null when none has been recorded (pre-27 SDKs/runtimes, or no blocking
+/// response has finished yet). Caller frees with `fm_string_free`.
+@_cdecl("fm_session_last_response_usage")
+public func fm_session_last_response_usage(
+    _ sessionPtr: UnsafeMutableRawPointer
+) -> UnsafeMutablePointer<CChar>? {
+    let state = Unmanaged<AnyObject>.fromOpaque(sessionPtr).takeUnretainedValue() as! SessionState
+    guard let json = state.lastResponseUsageJson else { return nil }
+    return strdup(json)
 }
 
 /// Checks if the session is currently responding.
@@ -835,7 +1090,7 @@ public func fm_generation_options_free(_ optionsPtr: UnsafeMutableRawPointer?) {
 }
 
 /// Parses generation options from JSON string.
-private func parseGenerationOptions(_ optionsJson: UnsafePointer<CChar>?) -> GenerationOptions {
+func parseGenerationOptions(_ optionsJson: UnsafePointer<CChar>?) -> GenerationOptions {
     guard let optionsJson = optionsJson else {
         return GenerationOptions()
     }
@@ -849,10 +1104,11 @@ private func parseGenerationOptions(_ optionsJson: UnsafePointer<CChar>?) -> Gen
         let decoded = try JSONDecoder().decode(GenerationOptionsDTO.self, from: jsonData)
 
         // Note: seed is not supported in current GenerationOptions API
-        return GenerationOptions(
-            sampling: decoded.sampling == "greedy" ? .greedy : nil,
+        return makeGenerationOptions(
+            sampling: decoded.sampling,
             temperature: decoded.temperature,
-            maximumResponseTokens: decoded.maximumResponseTokens.map { Int($0) }
+            maximumResponseTokens: decoded.maximumResponseTokens,
+            toolCallingMode: decoded.toolCallingMode
         )
     } catch {
         return GenerationOptions()
@@ -865,6 +1121,7 @@ private struct GenerationOptionsDTO: Decodable {
     var sampling: String?
     var maximumResponseTokens: UInt32?
     var seed: UInt64?
+    var toolCallingMode: String?
 }
 
 // MARK: - Structured (JSON) Response
@@ -919,9 +1176,9 @@ public func fm_session_stream_json(
     _ schemaJson: UnsafePointer<CChar>,
     _ optionsJson: UnsafePointer<CChar>?,
     _ userData: UnsafeMutableRawPointer?,
-    _ onChunk: @escaping @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void,
-    _ onDone: @escaping @convention(c) (UnsafeMutableRawPointer?) -> Void,
-    _ onError: @escaping @convention(c) (UnsafeMutableRawPointer?, Int32, UnsafePointer<CChar>?) -> Void
+    _ onChunk: @escaping StreamChunkCallbackFn,
+    _ onDone: @escaping StreamDoneCallbackFn,
+    _ onError: @escaping StreamErrorCallbackFn
 ) {
     let state = Unmanaged<AnyObject>.fromOpaque(sessionPtr).takeUnretainedValue() as! SessionState
     let promptString = String(cString: prompt)
@@ -939,6 +1196,12 @@ public func fm_session_stream_json(
     """
 
     let callbackQueue = DispatchQueue(label: "fm.ffi.callbacks.json", qos: .userInteractive)
+    let callbacks = StreamCallbackContext(
+        userData: userData,
+        onChunk: onChunk,
+        onDone: onDone,
+        onError: onError
+    )
     let semaphore = DispatchSemaphore(value: 0)
 
     let task = Task.detached {
@@ -949,14 +1212,18 @@ public func fm_session_stream_json(
                 let content = partialResponse.content
                 callbackQueue.sync {
                     content.withCString { ptr in
-                        onChunk(userData, ptr)
+                        callbacks.onChunk(callbacks.userData, ptr)
                     }
                 }
 
                 if Task.isCancelled {
                     callbackQueue.sync {
                         "Cancelled".withCString { ptr in
-                            onError(userData, FFIErrorCode.cancelled.rawValue, ptr)
+                            callbacks.onError(
+                                callbacks.userData,
+                                FFIErrorCode.cancelled.rawValue,
+                                ptr
+                            )
                         }
                     }
                     semaphore.signal()
@@ -965,14 +1232,20 @@ public func fm_session_stream_json(
             }
 
             callbackQueue.sync {
-                onDone(userData)
+                callbacks.onDone(callbacks.userData)
             }
         } catch {
             callbackQueue.sync {
-                let errorCode = FFIErrorCode.generationFailed.rawValue
-                let errorMessage = error.localizedDescription
+                let (errorCode, errorMessage): (Int32, String)
+                if let (code, message) = classifyPlatformError(error) {
+                    errorCode = code.rawValue
+                    errorMessage = message
+                } else {
+                    errorCode = FFIErrorCode.generationFailed.rawValue
+                    errorMessage = error.localizedDescription
+                }
                 errorMessage.withCString { ptr in
-                    onError(userData, errorCode, ptr)
+                    callbacks.onError(callbacks.userData, errorCode, ptr)
                 }
             }
         }
@@ -1094,7 +1367,7 @@ private func fm_rust_string_free(_ s: UnsafeMutablePointer<CChar>?)
 // MARK: - Async Helpers
 
 /// Helper for synchronously running Swift async code.
-private final class AsyncWaiter {
+final class AsyncWaiter {
     private final class AsyncState<T: Sendable>: @unchecked Sendable {
         var result: Result<T, Error>?
         let semaphore = DispatchSemaphore(value: 0)

@@ -8,6 +8,7 @@ use std::sync::PoisonError as StdPoisonError;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Error types for `FoundationModels` operations.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum Error {
     /// Model is not available on this device.
@@ -22,6 +23,9 @@ pub enum Error {
     /// Model is not ready (downloading or other system reasons).
     ModelNotReady,
 
+    /// Private Cloud Compute isn't ready to serve requests.
+    PrivateCloudComputeSystemNotReady,
+
     /// Invalid input provided (e.g., string contains null bytes).
     InvalidInput(String),
 
@@ -30,6 +34,48 @@ pub enum Error {
 
     /// Operation timed out.
     Timeout(String),
+
+    /// The requested API requires a newer Apple platform or SDK.
+    UnsupportedPlatform(String),
+
+    /// A Private Cloud Compute request failed due to a network error.
+    NetworkFailure(String),
+
+    /// The user's Private Cloud Compute quota is exhausted until it resets.
+    QuotaLimitReached(String),
+
+    /// Private Cloud Compute is temporarily unable to serve requests.
+    ServiceUnavailable(String),
+
+    /// The request exceeded the model's context window.
+    ContextSizeExceeded(String),
+
+    /// The request was rate limited; retry later.
+    RateLimited(String),
+
+    /// The request or response was blocked by a safety guardrail.
+    GuardrailViolation(String),
+
+    /// The model declined to answer the request.
+    Refusal(String),
+
+    /// The request uses a capability this model does not support.
+    UnsupportedCapability(String),
+
+    /// The transcript contains content this model cannot process.
+    UnsupportedTranscriptContent(String),
+
+    /// The generation guide or schema is not supported by this model.
+    UnsupportedGenerationGuide(String),
+
+    /// The request language or locale is not supported by this model.
+    UnsupportedLanguageOrLocale(String),
+
+    /// The on-device model assets are unavailable (e.g. not yet downloaded).
+    AssetsUnavailable(String),
+
+    /// The session is already responding to another request.
+    ConcurrentRequests(String),
 
     /// Error during tool invocation.
     ToolCall(ToolCallError),
@@ -71,9 +117,34 @@ impl fmt::Display for Error {
                     "Model is not ready (downloading or other system reasons)"
                 )
             }
+            Error::PrivateCloudComputeSystemNotReady => {
+                write!(f, "Private Cloud Compute is not ready to serve requests")
+            }
             Error::InvalidInput(msg) => write!(f, "Invalid input: {msg}"),
             Error::GenerationError(msg) => write!(f, "Generation error: {msg}"),
             Error::Timeout(msg) => write!(f, "Operation timed out: {msg}"),
+            Error::UnsupportedPlatform(msg) => write!(f, "Unsupported platform: {msg}"),
+            Error::NetworkFailure(msg) => write!(f, "Network failure: {msg}"),
+            Error::QuotaLimitReached(msg) => write!(f, "Quota limit reached: {msg}"),
+            Error::ServiceUnavailable(msg) => write!(f, "Service unavailable: {msg}"),
+            Error::ContextSizeExceeded(msg) => write!(f, "Context size exceeded: {msg}"),
+            Error::RateLimited(msg) => write!(f, "Rate limited: {msg}"),
+            Error::GuardrailViolation(msg) => write!(f, "Guardrail violation: {msg}"),
+            Error::Refusal(msg) => write!(f, "Model refused the request: {msg}"),
+            Error::UnsupportedCapability(msg) => write!(f, "Unsupported capability: {msg}"),
+            Error::UnsupportedTranscriptContent(msg) => {
+                write!(f, "Unsupported transcript content: {msg}")
+            }
+            Error::UnsupportedGenerationGuide(msg) => {
+                write!(f, "Unsupported generation guide: {msg}")
+            }
+            Error::UnsupportedLanguageOrLocale(msg) => {
+                write!(f, "Unsupported language or locale: {msg}")
+            }
+            Error::AssetsUnavailable(msg) => write!(f, "Model assets unavailable: {msg}"),
+            Error::ConcurrentRequests(msg) => {
+                write!(f, "Session is already responding: {msg}")
+            }
             Error::ToolCall(err) => {
                 write!(f, "Tool '{}' failed: {}", err.tool_name, err.inner_error)
             }
@@ -119,3 +190,29 @@ impl fmt::Display for ToolCallError {
 }
 
 impl std::error::Error for ToolCallError {}
+
+#[cfg(test)]
+mod tests {
+    use crate::error::Error;
+
+    #[test]
+    fn unsupported_platform_preserves_requirement() {
+        let error = Error::UnsupportedPlatform("requires macOS 27.0".to_string());
+        assert_eq!(
+            error.to_string(),
+            "Unsupported platform: requires macOS 27.0"
+        );
+    }
+
+    #[test]
+    fn pcc_errors_preserve_details() {
+        let error = Error::NetworkFailure("connection lost".to_string());
+        assert_eq!(error.to_string(), "Network failure: connection lost");
+
+        let error = Error::QuotaLimitReached("resets 2026-07-21".to_string());
+        assert_eq!(error.to_string(), "Quota limit reached: resets 2026-07-21");
+
+        let error = Error::ServiceUnavailable("try again later".to_string());
+        assert_eq!(error.to_string(), "Service unavailable: try again later");
+    }
+}

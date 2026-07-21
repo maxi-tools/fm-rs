@@ -7,6 +7,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");
+    println!("cargo:rerun-if-env-changed=SWIFTC");
+
     // Skip build on docs.rs
     if env::var("DOCS_RS").is_ok() {
         println!("cargo:warning=Skipping Swift compilation on docs.rs");
@@ -29,79 +32,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    let out_dir = PathBuf::from(env::var("OUT_DIR")?);
-    let swift_src = PathBuf::from("src/swift/ffi.swift");
-    let token_usage_api_src = PathBuf::from("src/swift/token_usage_api.swift");
-    let token_usage_fallback_src = PathBuf::from("src/swift/token_usage_fallback.swift");
     let module_name = "fm_ffi";
-    let lib_name = format!("lib{module_name}.a");
-
-    println!("cargo:rerun-if-changed={}", swift_src.display());
-    println!("cargo:rerun-if-changed={}", token_usage_api_src.display());
-    println!(
-        "cargo:rerun-if-changed={}",
-        token_usage_fallback_src.display()
-    );
-
-    // Determine Swift compiler
-    // SECURITY: SWIFTC is trusted build-time configuration. Command::new() does not
-    // use shell expansion, so this is safe from command injection. However, an attacker
-    // with env var control could point to a malicious binary - this is inherent to any
-    // configurable compiler path and matches cargo's own CC/CXX/RUSTC behavior.
-    let swiftc = env::var("SWIFTC").unwrap_or_else(|_| "swiftc".to_string());
-
-    // Compile Swift to static library
-    let swift_output = out_dir.join(&lib_name);
-    let swift_target = get_swift_target(&target)?;
-
-    // Get SDK path from xcrun
-    let sdk_path = get_sdk_path(&swift_target);
-    let sdk_name = get_sdk_name(&swift_target);
-    let use_token_usage_api = sdk_name.is_some_and(sdk_supports_token_usage_api);
-    let token_usage_src = if use_token_usage_api {
-        &token_usage_api_src
-    } else {
-        &token_usage_fallback_src
-    };
-
-    let swift_output_str = swift_output.to_str().ok_or("Invalid output path")?;
-    let swift_src_str = swift_src.to_str().ok_or("Invalid Swift source path")?;
-    let token_usage_src_str = token_usage_src
-        .to_str()
-        .ok_or("Invalid token usage Swift source path")?;
-
-    let mut swift_args: Vec<String> = vec![
-        "-emit-library".to_string(),
-        "-static".to_string(),
-        "-module-name".to_string(),
-        module_name.to_string(),
-        "-o".to_string(),
-        swift_output_str.to_string(),
-        "-target".to_string(),
-        swift_target.clone(),
-    ];
-
-    // Add SDK path if available
-    if let Some(ref sdk) = sdk_path {
-        swift_args.push("-sdk".to_string());
-        swift_args.push(sdk.clone());
-    }
-
-    swift_args.push(swift_src_str.to_string());
-    swift_args.push(token_usage_src_str.to_string());
-
-    println!("Compiling Swift code with: swiftc {}", swift_args.join(" "));
-
-    let status = Command::new(&swiftc).args(&swift_args).status()?;
-    if !status.success() {
-        return Err(format!("Swift compilation failed with status: {status}").into());
-    }
+    let out_dir = PathBuf::from(env::var("OUT_DIR")?);
+    compile_swift(&target, &out_dir, module_name)?;
 
     // Tell cargo where the library is
     println!("cargo:rustc-link-lib=static={module_name}");
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=framework=Foundation");
     println!("cargo:rustc-link-lib=framework=FoundationModels");
+    // Image decoding for multimodal attachments (session_27_api.swift).
+    println!("cargo:rustc-link-lib=framework=CoreGraphics");
+    println!("cargo:rustc-link-lib=framework=ImageIO");
+    // Built-in system tools via cross-import overlays (session_27_api.swift).
+    println!("cargo:rustc-link-lib=framework=Vision");
+    println!("cargo:rustc-link-lib=framework=CoreSpotlight");
 
     // Link Swift standard libraries
     if let Some(swift_lib_path) = get_swift_lib_path() {
@@ -118,9 +63,130 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Checks if the current platform is Apple
 fn is_apple_platform() -> bool {
-    env::var("CARGO_CFG_TARGET_OS")
-        .map(|os| os == "macos" || os == "ios")
-        .unwrap_or(false)
+    env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "macos" || os == "ios")
+}
+
+fn compile_swift(
+    target: &str,
+    out_dir: &std::path::Path,
+    module_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let swift_target = get_swift_target(target)?;
+    let sdk_name = get_sdk_name(&swift_target);
+    let sdk_path = sdk_name.and_then(get_sdk_path);
+    if let Some(path) = sdk_path.as_deref() {
+        emit_sdk_change_tracking(std::path::Path::new(path));
+    }
+    let sdk_version = sdk_name.and_then(get_sdk_version);
+    let private_cloud_compute = env::var_os("CARGO_FEATURE_PRIVATE_CLOUD_COMPUTE").is_some();
+    let sources = select_swift_sources(sdk_version.as_deref(), private_cloud_compute);
+    let swift_output = out_dir.join(format!("lib{module_name}.a"));
+
+    let mut args = vec![
+        "-emit-library".to_string(),
+        "-static".to_string(),
+        "-module-name".to_string(),
+        module_name.to_string(),
+        "-swift-version".to_string(),
+        "6".to_string(),
+        "-o".to_string(),
+        path_string(&swift_output)?,
+        "-target".to_string(),
+        swift_target,
+    ];
+    if let Some(sdk) = sdk_path {
+        args.extend(["-sdk".to_string(), sdk]);
+    }
+    for source in sources {
+        args.push(path_string(&source)?);
+    }
+
+    // SECURITY: SWIFTC follows the same trusted build-time override model as
+    // Cargo's CC, CXX, and RUSTC configuration.
+    let swiftc = env::var("SWIFTC").unwrap_or_else(|_| "swiftc".to_string());
+    println!("Compiling Swift code with: swiftc {}", args.join(" "));
+    let status = Command::new(&swiftc).args(&args).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Swift compilation failed with status: {status}").into())
+    }
+}
+
+fn select_swift_sources(sdk_version: Option<&str>, private_cloud_compute: bool) -> Vec<PathBuf> {
+    let version = sdk_version.and_then(|raw_version| {
+        let version = parse_sdk_version(raw_version);
+        if version.is_none() {
+            println!(
+                "cargo:warning=Failed to parse SDK version '{raw_version}'. Falling back to compatibility stubs."
+            );
+        }
+        version
+    });
+    let supports_27 = version.is_some_and(sdk_supports_foundation_models_27);
+    let token_usage = match version {
+        Some(version) if sdk_supports_token_usage_api(version) => "src/swift/token_usage_api.swift",
+        _ => "src/swift/token_usage_fallback.swift",
+    };
+    let private_cloud_compute_source = if private_cloud_compute && supports_27 {
+        "src/swift/private_cloud_compute_api.swift"
+    } else {
+        "src/swift/private_cloud_compute_fallback.swift"
+    };
+    let reasoning_source = if supports_27 {
+        "src/swift/reasoning_api.swift"
+    } else {
+        "src/swift/reasoning_fallback.swift"
+    };
+    let generation_options_source = if supports_27 {
+        "src/swift/generation_options_api.swift"
+    } else {
+        "src/swift/generation_options_legacy.swift"
+    };
+    let session_27_source = if supports_27 {
+        "src/swift/session_27_api.swift"
+    } else {
+        "src/swift/session_27_fallback.swift"
+    };
+    let sources = [
+        "src/swift/ffi.swift",
+        token_usage,
+        private_cloud_compute_source,
+        reasoning_source,
+        generation_options_source,
+        session_27_source,
+    ]
+    .map(PathBuf::from)
+    .to_vec();
+
+    for source in all_swift_sources() {
+        println!("cargo:rerun-if-changed={}", source.display());
+    }
+    sources
+}
+
+fn all_swift_sources() -> Vec<PathBuf> {
+    [
+        "src/swift/ffi.swift",
+        "src/swift/token_usage_api.swift",
+        "src/swift/token_usage_fallback.swift",
+        "src/swift/private_cloud_compute_api.swift",
+        "src/swift/private_cloud_compute_fallback.swift",
+        "src/swift/reasoning_api.swift",
+        "src/swift/reasoning_fallback.swift",
+        "src/swift/generation_options_api.swift",
+        "src/swift/generation_options_legacy.swift",
+        "src/swift/session_27_api.swift",
+        "src/swift/session_27_fallback.swift",
+    ]
+    .map(PathBuf::from)
+    .to_vec()
+}
+
+fn path_string(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| format!("Invalid UTF-8 path: {}", path.display()).into())
 }
 
 fn is_supported_target(target: &str) -> bool {
@@ -174,10 +240,8 @@ fn get_swift_lib_path() -> Option<String> {
     None
 }
 
-/// Gets the SDK path for the given Swift target
-fn get_sdk_path(swift_target: &str) -> Option<String> {
-    let sdk_name = get_sdk_name(swift_target)?;
-
+/// Gets the selected SDK path.
+fn get_sdk_path(sdk_name: &str) -> Option<String> {
     let output = Command::new("xcrun")
         .args(["--show-sdk-path", "--sdk", sdk_name])
         .output()
@@ -188,6 +252,50 @@ fn get_sdk_path(swift_target: &str) -> Option<String> {
         None
     } else {
         Some(path)
+    }
+}
+
+/// Gets the selected SDK version with one `xcrun` invocation per build.
+fn get_sdk_version(sdk_name: &str) -> Option<String> {
+    let output = match Command::new("xcrun")
+        .args(["--show-sdk-version", "--sdk", sdk_name])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => {
+            println!(
+                "cargo:warning=Failed to query the '{sdk_name}' SDK version. Falling back to compatibility stubs."
+            );
+            return None;
+        }
+    };
+
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if version.is_empty() {
+        println!(
+            "cargo:warning=The '{sdk_name}' SDK version was empty. Falling back to compatibility stubs."
+        );
+        None
+    } else {
+        Some(version)
+    }
+}
+
+/// Tracks the files that change when Xcode or the selected SDK is upgraded.
+fn emit_sdk_change_tracking(sdk_path: &std::path::Path) {
+    println!(
+        "cargo:rerun-if-changed={}",
+        sdk_path.join("SDKSettings.json").display()
+    );
+
+    if let Some(contents_path) = sdk_path
+        .ancestors()
+        .find(|path| path.file_name().is_some_and(|name| name == "Contents"))
+    {
+        println!(
+            "cargo:rerun-if-changed={}",
+            contents_path.join("version.plist").display()
+        );
     }
 }
 
@@ -209,49 +317,27 @@ fn get_sdk_name(swift_target: &str) -> Option<&'static str> {
     }
 }
 
-fn sdk_supports_token_usage_api(sdk_name: &str) -> bool {
-    let Ok(output) = Command::new("xcrun")
-        .args(["--show-sdk-version", "--sdk", sdk_name])
-        .output()
-    else {
-        println!(
-            "cargo:warning=Failed to execute 'xcrun --show-sdk-version --sdk {sdk_name}'. Falling back to token usage stubs."
-        );
-        return false;
-    };
+fn sdk_supports_token_usage_api(version: (u32, u32)) -> bool {
+    sdk_version_is_at_least(version, 26, 4)
+}
 
-    let version = String::from_utf8_lossy(&output.stdout);
-    let trimmed_version = version.trim();
-    let mut parts = trimmed_version.split('.');
+fn sdk_supports_foundation_models_27(version: (u32, u32)) -> bool {
+    sdk_version_is_at_least(version, 27, 0)
+}
 
-    let major = if let Some(value) = parts.next() {
-        if let Ok(parsed) = value.parse::<u32>() {
-            parsed
-        } else {
-            println!(
-                "cargo:warning=Failed to parse SDK major version '{trimmed_version}' for sdk '{sdk_name}'. Falling back to token usage stubs."
-            );
-            return false;
-        }
-    } else {
-        println!(
-            "cargo:warning=SDK version output was empty for sdk '{sdk_name}'. Falling back to token usage stubs."
-        );
-        return false;
-    };
+fn parse_sdk_version(version: &str) -> Option<(u32, u32)> {
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse::<u32>().ok()?;
+    let minor = parts
+        .next()
+        .map_or(Some(0), |part| part.parse::<u32>().ok())?;
+    Some((major, minor))
+}
 
-    let minor = if let Some(value) = parts.next() {
-        if let Ok(parsed) = value.parse::<u32>() {
-            parsed
-        } else {
-            println!(
-                "cargo:warning=Failed to parse SDK minor version '{trimmed_version}' for sdk '{sdk_name}'. Falling back to token usage stubs."
-            );
-            return false;
-        }
-    } else {
-        0
-    };
-
-    major > 26 || (major == 26 && minor >= 4)
+fn sdk_version_is_at_least(
+    (major, minor): (u32, u32),
+    required_major: u32,
+    required_minor: u32,
+) -> bool {
+    major > required_major || (major == required_major && minor >= required_minor)
 }

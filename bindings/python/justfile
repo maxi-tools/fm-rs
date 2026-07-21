@@ -5,6 +5,9 @@ set shell := ["bash", "-cu"]
 
 # Swift runtime path for macOS
 swift_lib := "DYLD_LIBRARY_PATH=/usr/lib/swift"
+macos_deployment_target := "26.0"
+# Work around rust-lang/rust#157750 until its LLVM fix reaches stable Rust.
+python_build_env := "env MACOSX_DEPLOYMENT_TARGET=" + macos_deployment_target + " CARGO_PROFILE_RELEASE_STRIP=none"
 
 # Default recipe - show help
 default:
@@ -14,21 +17,21 @@ default:
 
 # Sync dependencies and build in development mode
 build:
-    uv sync
-    uv run maturin develop
+    {{ python_build_env }} uv sync
+    {{ python_build_env }} uv run maturin develop
 
 # Build in release mode
 build-release:
-    uv sync
-    uv run maturin develop --release
+    {{ python_build_env }} uv sync
+    {{ python_build_env }} uv run maturin develop --release
 
 # Build wheel (release)
 wheel:
-    uv run maturin build --release
+    {{ python_build_env }} uv run maturin build --release
 
 # Build wheel for specific target
 wheel-target target:
-    uv run maturin build --release --target {{ target }}
+    {{ python_build_env }} uv run maturin build --release --target {{ target }}
 
 # Build source distribution
 sdist:
@@ -40,7 +43,7 @@ sdist:
 install:
     #!/usr/bin/env bash
     rm -rf .venv/lib/python*/site-packages/fm*
-    .venv/bin/maturin build --out dist
+    {{ python_build_env }} .venv/bin/maturin build --out dist
     uv pip install dist/fm_rs-*.whl
     rm -rf dist/
 
@@ -116,8 +119,8 @@ dist: wheel sdist
 
 # Dry-run publish to TestPyPI
 publish-test:
-    uv sync --group dev --no-install-project
-    uv run maturin publish --repository testpypi
+    {{ python_build_env }} uv sync --group dev --no-install-project
+    {{ python_build_env }} uv run maturin publish --repository testpypi
 
 # Publish to PyPI (use GitHub Actions for production releases)
 publish:
@@ -126,8 +129,8 @@ publish:
 
 # Publish to PyPI from local machine (ensures maturin is available)
 publish-live:
-    uv sync --group dev --no-install-project
-    uv run maturin publish
+    {{ python_build_env }} uv sync --group dev --no-install-project
+    {{ python_build_env }} uv run maturin publish
 
 # ===== Interactive =====
 

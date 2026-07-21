@@ -38,15 +38,15 @@ jobs:
             # Read from Cargo.toml (source of truth for dynamic versioning)
             VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Check publish conditions
         id: check
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]] || [[ "${{ github.event.inputs.publish }}" == "true" ]]; then
-            echo "should_publish=true" >> $GITHUB_OUTPUT
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
           else
-            echo "should_publish=false" >> $GITHUB_OUTPUT
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Verify Cargo.toml version matches tag
@@ -65,6 +65,10 @@ jobs:
     name: Build macOS ARM64
     needs: verify
     runs-on: macos-26
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      # rust-lang/rust#157750: avoid malformed stripped Mach-O string tables.
+      CARGO_PROFILE_RELEASE_STRIP: none
     steps:
       - uses: actions/checkout@v6
 
