@@ -6,8 +6,9 @@
 //! - Apple Intelligence must be enabled
 //! - The device must support Apple Intelligence
 
+use std::time::{Duration, Instant};
+
 use fm_rs::{Error, GenerationOptions, ModelAvailability, Session, SystemLanguageModel};
-use std::time::Duration;
 
 // ============================================================================
 // Integration Tests (require FoundationModels to be available)
@@ -553,7 +554,7 @@ fn test_respond_json() {
 
 #[test]
 #[ignore = "Requires Apple Intelligence and the Foundation Models 27 runtime"]
-fn test_respond_json_timeout_releases_session_and_reports_usage() {
+fn test_respond_json_timeout_returns_and_fresh_session_reports_usage() {
     let model = SystemLanguageModel::new().expect("Failed to create model");
     assert!(model.is_available(), "Foundation Model is not available");
 
@@ -571,6 +572,7 @@ fn test_respond_json_timeout_releases_session_and_reports_usage() {
         .max_response_tokens(32)
         .build();
 
+    let started = Instant::now();
     let timeout_error = session
         .respond_json_with_timeout(
             "Return the answer timeout as JSON.",
@@ -579,19 +581,26 @@ fn test_respond_json_timeout_releases_session_and_reports_usage() {
             Duration::from_millis(1),
         )
         .expect_err("The first response should exceed a 1 ms timeout");
+    let elapsed = started.elapsed();
     assert!(
         matches!(timeout_error, Error::Timeout(_)),
         "Expected Error::Timeout, got {timeout_error:?}"
     );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "The 1 ms timeout should return promptly, but took {elapsed:?}"
+    );
 
-    let response = session
+    drop(session);
+    let fresh_session = Session::new(&model).expect("Failed to create fresh session");
+    let response = fresh_session
         .respond_json_with_timeout(
             "Return the answer ready as JSON.",
             &schema,
             &options,
             Duration::from_secs(30),
         )
-        .expect("The session should be reusable immediately after the timeout");
+        .expect("The fresh session should complete a bounded JSON response");
     let parsed: Value =
         serde_json::from_str(response.content()).expect("Response should contain valid JSON");
 

@@ -984,6 +984,10 @@ impl Session {
     /// [`respond_json`](Self::respond_json). Positive sub-millisecond timeouts are rounded up
     /// to one millisecond, the finest resolution supported by the Swift bridge.
     ///
+    /// The timeout bounds only the caller's wait. On expiry, the bridge requests cooperative
+    /// task cancellation and returns [`Error::Timeout`]; it cannot force Foundation Models
+    /// framework work to stop immediately.
+    ///
     /// # Example
     ///
     /// ```rust,no_run
