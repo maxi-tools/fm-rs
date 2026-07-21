@@ -974,6 +974,96 @@ impl Session {
         Ok(content)
     }
 
+    /// Sends a prompt and returns a structured JSON response, waiting at most `timeout`.
+    ///
+    /// The response content contains the extracted JSON string. On Foundation Models 27,
+    /// [`Response::usage`] also exposes the framework's per-response token usage when
+    /// available. If `timeout` is zero, this uses the same path as [`respond_json`](Self::respond_json).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use std::time::Duration;
+    ///
+    /// use fm_rs::{GenerationOptions, Session, SystemLanguageModel};
+    /// use serde_json::json;
+    ///
+    /// let model = SystemLanguageModel::new()?;
+    /// let session = Session::new(&model)?;
+    /// let schema = json!({
+    ///     "type": "object",
+    ///     "properties": { "answer": { "type": "string" } },
+    ///     "required": ["answer"]
+    /// });
+    ///
+    /// let response = session.respond_json_with_timeout(
+    ///     "Answer briefly",
+    ///     &schema,
+    ///     &GenerationOptions::default(),
+    ///     Duration::from_secs(30),
+    /// )?;
+    /// let json: serde_json::Value = serde_json::from_str(response.content())?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn respond_json_with_timeout(
+        &self,
+        prompt: &str,
+        schema: &serde_json::Value,
+        options: &GenerationOptions,
+        timeout: Duration,
+    ) -> Result<Response> {
+        let Some(timeout_ms) = json_timeout_millis(timeout)? else {
+            let content = self.respond_json(prompt, schema, options)?;
+            return Ok(Response::with_usage(
+                content,
+                self.fetch_last_response_usage(),
+            ));
+        };
+
+        let prompt_c = CString::new(prompt)?;
+        let schema_c = CString::new(serde_json::to_string(schema)?)?;
+        let options_c = CString::new(options.to_json())?;
+        let mut error: SwiftPtr = ptr::null_mut();
+
+        let response_ptr = unsafe {
+            ffi::fm_session_respond_json_with_timeout(
+                self.ptr.as_ptr(),
+                prompt_c.as_ptr(),
+                schema_c.as_ptr(),
+                options_c.as_ptr(),
+                timeout_ms,
+                &raw mut error,
+            )
+        };
+
+        if !error.is_null() {
+            return Err(error_from_swift(error));
+        }
+
+        if response_ptr.is_null() {
+            return Err(Error::GenerationError(
+                "Received null response from JSON generation".to_string(),
+            ));
+        }
+
+        let content = unsafe {
+            let cstr = CStr::from_ptr(response_ptr);
+            let content = cstr
+                .to_str()
+                .map_err(|error| {
+                    Error::GenerationError(format!("Invalid UTF-8 in JSON response: {error}"))
+                })?
+                .to_owned();
+            ffi::fm_string_free(response_ptr);
+            content
+        };
+
+        Ok(Response::with_usage(
+            content,
+            self.fetch_last_response_usage(),
+        ))
+    }
+
     /// Sends a prompt and returns a deserialized structured response.
     ///
     /// This is a convenience method that calls `respond_json` and deserializes
@@ -1510,6 +1600,14 @@ fn timeout_millis(timeout: Duration) -> Result<u64> {
     })
 }
 
+fn json_timeout_millis(timeout: Duration) -> Result<Option<u64>> {
+    if timeout.is_zero() {
+        Ok(None)
+    } else {
+        timeout_millis(timeout).map(Some)
+    }
+}
+
 /// Maximum input size for `autoclose_json` to prevent resource exhaustion (1 MB).
 const AUTOCLOSE_JSON_MAX_SIZE: usize = 1024 * 1024;
 
@@ -1566,8 +1664,8 @@ mod tests {
 
     use crate::error::Error;
     use crate::session::{
-        Attachment, Response, SessionUsage, SystemTool, attachment_specs, session_usage_from_json,
-        system_tools_json, timeout_millis,
+        Attachment, Response, SessionUsage, SystemTool, attachment_specs, json_timeout_millis,
+        session_usage_from_json, system_tools_json, timeout_millis,
     };
 
     #[test]
@@ -1584,6 +1682,36 @@ mod tests {
         let timeout = Duration::from_secs(u64::MAX);
         assert!(matches!(
             timeout_millis(timeout),
+            Err(Error::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn respond_json_with_timeout_has_expected_public_signature() {
+        fn assert_signature(
+            _: fn(
+                &crate::Session,
+                &str,
+                &serde_json::Value,
+                &crate::GenerationOptions,
+                Duration,
+            ) -> crate::Result<Response>,
+        ) {
+        }
+
+        assert_signature(crate::Session::respond_json_with_timeout);
+    }
+
+    #[test]
+    fn respond_json_with_timeout_zero_selects_existing_json_path() {
+        assert!(matches!(json_timeout_millis(Duration::ZERO), Ok(None)));
+    }
+
+    #[test]
+    fn respond_json_with_timeout_reuses_timeout_overflow_error() {
+        let timeout = Duration::from_secs(u64::MAX);
+        assert!(matches!(
+            json_timeout_millis(timeout),
             Err(Error::InvalidInput(_))
         ));
     }

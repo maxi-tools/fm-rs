@@ -230,7 +230,7 @@ support transcript replacement (`Session::set_transcript`) and
 | 26-era `GenerationError` bridging (macOS/iOS 26 runtimes) | ✅ Implemented — same typed errors on all runtimes |
 | `SystemLanguageModel.contextSize` / PCC `contextSize` | ✅ Implemented (`context_size`, `ContextLimit::for_model`) |
 | Exact session token usage | ✅ Implemented (`Session::usage`, `SessionUsage::delta_since`) |
-| Per-`Response` usage property | 🟡 Partial — implemented for blocking respond paths |
+| Per-`Response` usage property | 🟡 Partial — implemented for blocking respond paths, including `respond_json_with_timeout` |
 | Python bindings parity | 🟡 Partial — typed errors, context size, usage, tool modes, attachments, system tools, and transcript controls are implemented; PCC remains Rust-only |
 | Tool-calling modes (allowed/required/disallowed) | ✅ Implemented (`ToolCallingMode`) |
 | Multimodal image attachments | 🟡 Partial — blocking responds implemented; streaming/structured variants deferred |
@@ -247,6 +247,8 @@ support transcript replacement (`Session::set_transcript`) and
 ## Runtime Notes (macOS)
 
 - FFI calls are synchronous. Use `spawn_blocking` in async runtimes.
+- Known limitation: the 8,192-token generation overflow is not always classified as
+  `ContextSizeExceeded`; it may surface as a generic generation error.
 - If you see `libswift_Concurrency.dylib` load errors, add Swift rpaths in your binary crate’s `build.rs`.
 
 ```rust

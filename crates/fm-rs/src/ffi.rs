@@ -228,6 +228,18 @@ unsafe extern "C" {
         error_out: *mut SwiftPtr,
     ) -> *mut c_char;
 
+    /// Sends a prompt and returns a JSON response matching the provided schema,
+    /// waiting at most `timeout_ms` milliseconds.
+    /// Returns null on error. Caller must free with `fm_string_free`.
+    pub fn fm_session_respond_json_with_timeout(
+        session: SwiftPtr,
+        prompt: *const c_char,
+        schema_json: *const c_char,
+        options_json: *const c_char,
+        timeout_ms: u64,
+        error_out: *mut SwiftPtr,
+    ) -> *mut c_char;
+
     /// Streams a JSON response matching the provided schema.
     /// Calls `on_chunk` for each text chunk, `on_done` when complete, `on_error` on failure.
     pub fn fm_session_stream_json(

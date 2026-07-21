@@ -1126,6 +1126,41 @@ private struct GenerationOptionsDTO: Decodable {
 
 // MARK: - Structured (JSON) Response
 
+private func structuredPrompt(_ prompt: String, schema: String) -> String {
+    """
+    \(prompt)
+
+    IMPORTANT: You must respond with valid JSON that matches this schema exactly:
+    \(schema)
+
+    Output only the JSON object, with no additional text, markdown formatting, or explanation.
+    """
+}
+
+private func respondJson(
+    state: SessionState,
+    prompt: String,
+    schema: String,
+    options: GenerationOptions,
+    timeoutMs: UInt64? = nil
+) throws -> String {
+    let formattedPrompt = structuredPrompt(prompt, schema: schema)
+    let operation: @Sendable () async throws -> (String, String?) = {
+        let response = try await state.session.respond(to: formattedPrompt, options: options)
+        return (response.content, responseUsageJson(response))
+    }
+
+    let result: (content: String, usageJson: String?)
+    if let timeoutMs = timeoutMs {
+        result = try AsyncWaiter.wait(timeoutMs: timeoutMs, operation)
+    } else {
+        result = try AsyncWaiter.wait(operation)
+    }
+
+    state.setLastResponseUsage(result.usageJson)
+    return extractJson(from: result.content)
+}
+
 /// Sends a prompt and returns a JSON response matching the provided schema.
 /// The schema is used to instruct the model to output valid JSON.
 @_cdecl("fm_session_respond_json")
@@ -1141,24 +1176,46 @@ public func fm_session_respond_json(
     let schemaString = String(cString: schemaJson)
     let options = parseGenerationOptions(optionsJson)
 
-    // Build a prompt that instructs the model to output JSON matching the schema
-    let structuredPrompt = """
-    \(promptString)
+    do {
+        let jsonContent = try respondJson(
+            state: state,
+            prompt: promptString,
+            schema: schemaString,
+            options: options
+        )
+        return strdup(jsonContent)
+    } catch {
+        if let errorOut = errorOut {
+            errorOut.pointee = createErrorFromException(error)
+        }
+        return nil
+    }
+}
 
-    IMPORTANT: You must respond with valid JSON that matches this schema exactly:
-    \(schemaString)
-
-    Output only the JSON object, with no additional text, markdown formatting, or explanation.
-    """
+/// Sends a prompt and returns a JSON response matching the provided schema,
+/// waiting at most timeoutMs milliseconds. A zero timeout uses the existing path.
+@_cdecl("fm_session_respond_json_with_timeout")
+public func fm_session_respond_json_with_timeout(
+    _ sessionPtr: UnsafeMutableRawPointer,
+    _ prompt: UnsafePointer<CChar>,
+    _ schemaJson: UnsafePointer<CChar>,
+    _ optionsJson: UnsafePointer<CChar>?,
+    _ timeoutMs: UInt64,
+    _ errorOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>?
+) -> UnsafeMutablePointer<CChar>? {
+    let state = Unmanaged<AnyObject>.fromOpaque(sessionPtr).takeUnretainedValue() as! SessionState
+    let promptString = String(cString: prompt)
+    let schemaString = String(cString: schemaJson)
+    let options = parseGenerationOptions(optionsJson)
 
     do {
-        let content = try AsyncWaiter.wait {
-            let response = try await state.session.respond(to: structuredPrompt, options: options)
-            return response.content
-        }
-
-        // Try to extract JSON from the response (handle potential markdown code blocks)
-        let jsonContent = extractJson(from: content)
+        let jsonContent = try respondJson(
+            state: state,
+            prompt: promptString,
+            schema: schemaString,
+            options: options,
+            timeoutMs: timeoutMs == 0 ? nil : timeoutMs
+        )
         return strdup(jsonContent)
     } catch {
         if let errorOut = errorOut {
@@ -1185,15 +1242,7 @@ public func fm_session_stream_json(
     let schemaString = String(cString: schemaJson)
     let options = parseGenerationOptions(optionsJson)
 
-    // Build a prompt that instructs the model to output JSON matching the schema
-    let structuredPrompt = """
-    \(promptString)
-
-    IMPORTANT: You must respond with valid JSON that matches this schema exactly:
-    \(schemaString)
-
-    Output only the JSON object, with no additional text, markdown formatting, or explanation.
-    """
+    let formattedPrompt = structuredPrompt(promptString, schema: schemaString)
 
     let callbackQueue = DispatchQueue(label: "fm.ffi.callbacks.json", qos: .userInteractive)
     let callbacks = StreamCallbackContext(
@@ -1206,7 +1255,7 @@ public func fm_session_stream_json(
 
     let task = Task.detached {
         do {
-            let stream = state.session.streamResponse(to: structuredPrompt, options: options)
+            let stream = state.session.streamResponse(to: formattedPrompt, options: options)
 
             for try await partialResponse in stream {
                 let content = partialResponse.content
