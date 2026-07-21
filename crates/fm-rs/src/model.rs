@@ -616,10 +616,11 @@ mod tests {
     #[cfg(feature = "private-cloud-compute")]
     use std::time::{Duration, UNIX_EPOCH};
 
-    #[cfg(feature = "private-cloud-compute")]
     use crate::error::Error;
-    use crate::ffi::AvailabilityCode;
-    use crate::model::{ModelAvailability, estimate_tokens, token_usage_from_raw};
+    use crate::ffi::{AvailabilityCode, ErrorCode};
+    use crate::model::{
+        ModelAvailability, error_from_parts, estimate_tokens, token_usage_from_raw,
+    };
     #[cfg(feature = "private-cloud-compute")]
     use crate::model::{QuotaStatus, quota_usage_from_json, unix_seconds_to_system_time};
 
@@ -696,6 +697,17 @@ mod tests {
     fn estimate_tokens_should_use_div_ceil() {
         assert_eq!(estimate_tokens("abcd", 4), 1);
         assert_eq!(estimate_tokens("abcde", 4), 2);
+    }
+
+    #[test]
+    fn context_size_exceeded_ffi_code_preserves_original_detail() {
+        let detail = "Provided a request larger than the model context window.";
+        let error = error_from_parts(ErrorCode::ContextSizeExceeded as i32, detail.to_string());
+
+        match error {
+            Error::ContextSizeExceeded(message) => assert_eq!(message, detail),
+            other => panic!("expected ContextSizeExceeded, got {other:?}"),
+        }
     }
 
     #[test]

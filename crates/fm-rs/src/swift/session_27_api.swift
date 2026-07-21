@@ -52,41 +52,41 @@ func classifyLanguageModelError(_ error: Error) -> (FFIErrorCode, String)? {
         }
     }
 
-    guard let modelError = error as? LanguageModelError else {
-        return nil
+    if let modelError = error as? LanguageModelError {
+        let base = modelError.errorDescription
+        switch modelError {
+        case .contextSizeExceeded(let details):
+            let message = base ?? details.debugDescription
+            return (
+                .contextSizeExceeded,
+                message + " (context size \(details.contextSize) tokens, request \(details.tokenCount) tokens)"
+            )
+        case .rateLimited(let details):
+            var message = base ?? details.debugDescription
+            if let resetDate = details.resetDate {
+                message += " (resets \(ISO8601DateFormatter().string(from: resetDate)))"
+            }
+            return (.rateLimited, message)
+        case .guardrailViolation(let details):
+            return (.guardrailViolation, base ?? details.debugDescription)
+        case .refusal(let details):
+            return (.refusal, base ?? details.debugDescription)
+        case .unsupportedCapability(let details):
+            return (.unsupportedCapability, base ?? details.debugDescription)
+        case .unsupportedTranscriptContent(let details):
+            return (.unsupportedTranscriptContent, base ?? details.debugDescription)
+        case .unsupportedGenerationGuide(let details):
+            return (.unsupportedGenerationGuide, base ?? details.debugDescription)
+        case .unsupportedLanguageOrLocale(let details):
+            return (.unsupportedLanguageOrLocale, base ?? details.debugDescription)
+        case .timeout(let details):
+            return (.timeout, base ?? details.debugDescription)
+        @unknown default:
+            return (.generationFailed, modelError.localizedDescription)
+        }
     }
 
-    let base = modelError.errorDescription
-    switch modelError {
-    case .contextSizeExceeded(let details):
-        let message = base ?? details.debugDescription
-        return (
-            .contextSizeExceeded,
-            message + " (context size \(details.contextSize) tokens, request \(details.tokenCount) tokens)"
-        )
-    case .rateLimited(let details):
-        var message = base ?? details.debugDescription
-        if let resetDate = details.resetDate {
-            message += " (resets \(ISO8601DateFormatter().string(from: resetDate)))"
-        }
-        return (.rateLimited, message)
-    case .guardrailViolation(let details):
-        return (.guardrailViolation, base ?? details.debugDescription)
-    case .refusal(let details):
-        return (.refusal, base ?? details.debugDescription)
-    case .unsupportedCapability(let details):
-        return (.unsupportedCapability, base ?? details.debugDescription)
-    case .unsupportedTranscriptContent(let details):
-        return (.unsupportedTranscriptContent, base ?? details.debugDescription)
-    case .unsupportedGenerationGuide(let details):
-        return (.unsupportedGenerationGuide, base ?? details.debugDescription)
-    case .unsupportedLanguageOrLocale(let details):
-        return (.unsupportedLanguageOrLocale, base ?? details.debugDescription)
-    case .timeout(let details):
-        return (.timeout, base ?? details.debugDescription)
-    @unknown default:
-        return (.generationFailed, modelError.localizedDescription)
-    }
+    return nil
 }
 
 // MARK: - Built-in System Tools

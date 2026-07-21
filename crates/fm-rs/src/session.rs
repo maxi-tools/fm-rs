@@ -704,10 +704,11 @@ impl Session {
     /// Foundation Models 27 reports authoritative input, cached-input,
     /// output, and reasoning token counts across all requests in this
     /// session. To measure a single request, snapshot before and after and
-    /// use [`SessionUsage::delta_since`]. Apple's per-response usage
-    /// property is not yet bridged into [`Response`]. On older build SDKs
-    /// or runtimes this returns [`Error::UnsupportedPlatform`]; use
-    /// [`crate::estimate_tokens`] there instead.
+    /// use [`SessionUsage::delta_since`]. Per-response usage is bridged into
+    /// [`Response::usage`] on blocking response paths; per-response usage for
+    /// streaming remains unsupported. On older build SDKs or runtimes this
+    /// returns [`Error::UnsupportedPlatform`]; use [`crate::estimate_tokens`]
+    /// there instead.
     pub fn usage(&self) -> Result<SessionUsage> {
         let mut error: SwiftPtr = ptr::null_mut();
         let json_ptr = unsafe { ffi::fm_session_usage(self.ptr.as_ptr(), &raw mut error) };

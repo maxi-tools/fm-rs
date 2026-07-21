@@ -171,6 +171,14 @@ require building with the macOS/iOS 27 SDK. On older SDKs or runtimes, session
 APIs return `Error::UnsupportedPlatform`; `ToolCallingMode` is ignored and the
 framework keeps its default allowed behavior.
 
+On the observed 8,192-token on-device context window, enable one built-in
+system tool at a time. Combined tool schemas can exhaust the context window
+before the prompt is processed.
+
+For vision tools, give each image attachment a meaningful `.with_label(...)`
+and refer to that same label in the prompt. The example below uses `receipt` in
+both places.
+
 ```rust
 use fm_rs::{
     Attachment, ContextLimit, GenerationOptions, Session, SystemLanguageModel, SystemTool,
@@ -247,8 +255,8 @@ support transcript replacement (`Session::set_transcript`) and
 ## Runtime Notes (macOS)
 
 - FFI calls are synchronous. Use `spawn_blocking` in async runtimes.
-- Known limitation: the 8,192-token generation overflow is not always classified as
-  `ContextSizeExceeded`; it may surface as a generic generation error.
+- macOS 27 built-in-tool schema overflows are classified as `ContextSizeExceeded`
+  on blocking and streaming paths, including the runtime's private bridged error.
 - If you see `libswift_Concurrency.dylib` load errors, add Swift rpaths in your binary crate’s `build.rs`.
 
 ```rust

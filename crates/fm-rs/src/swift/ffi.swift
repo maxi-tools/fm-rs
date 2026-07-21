@@ -146,12 +146,34 @@ private func createErrorFromException(_ error: Error, defaultCode: FFIErrorCode 
 }
 
 /// Maps platform error types onto stable FFI codes: PCC errors first, the
-/// Foundation Models 27 taxonomy second, and the 26-era `GenerationError`
-/// cases (still thrown by macOS/iOS 26 runtimes) last.
+/// Foundation Models 27 taxonomy second, 26-era `GenerationError` cases third,
+/// and the observed private bridge identity last.
 func classifyPlatformError(_ error: Error) -> (FFIErrorCode, String)? {
     classifyPrivateCloudComputeError(error)
         ?? classifyLanguageModelError(error)
         ?? classifyLegacyGenerationError(error)
+        ?? classifyObservedGenerativeFunctionsContextSizeError(error)
+}
+
+private let generativeFunctionsErrorDomain =
+    "com.apple.GenerativeFunctionsFoundation.GenerativeError"
+private let generativeFunctionsContextSizeExceededCode = 4_050_000
+
+/// macOS 27.0 beta 1 (26A5388g), with Xcode 27.0 beta 1 (27A5228h), was observed
+/// throwing the private `GenerativeFunctionsFoundation.GenerativeError` when
+/// the combined OCR, barcode reader, and Spotlight schemas exceeded the context
+/// window. Blocking and streaming bridged it to this exact NSError domain/code.
+/// This private identity is not guaranteed across Apple beta or runtime changes.
+private func classifyObservedGenerativeFunctionsContextSizeError(
+    _ error: Error
+) -> (FFIErrorCode, String)? {
+    let nsError = error as NSError
+    guard nsError.domain == generativeFunctionsErrorDomain,
+          nsError.code == generativeFunctionsContextSizeExceededCode
+    else {
+        return nil
+    }
+    return (.contextSizeExceeded, error.localizedDescription)
 }
 
 // MARK: - Legacy (Foundation Models 26) Error Classification

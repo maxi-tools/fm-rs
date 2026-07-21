@@ -8,7 +8,9 @@
 
 use std::time::{Duration, Instant};
 
-use fm_rs::{Error, GenerationOptions, ModelAvailability, Session, SystemLanguageModel};
+use fm_rs::{
+    Error, GenerationOptions, ModelAvailability, Session, SystemLanguageModel, SystemTool,
+};
 
 // ============================================================================
 // Integration Tests (require FoundationModels to be available)
@@ -157,6 +159,49 @@ fn test_streaming() {
         "Should have received at least one chunk"
     );
     println!("Received {} chunks", chunks.len());
+}
+
+fn context_overflow_session(model: &SystemLanguageModel) -> Session {
+    Session::builder(model)
+        .system_tool(SystemTool::Ocr)
+        .system_tool(SystemTool::BarcodeReader)
+        .system_tool(SystemTool::SpotlightSearch)
+        .build()
+        .expect("Failed to create a session with all built-in system tools")
+}
+
+#[test]
+#[ignore = "Requires Apple Intelligence and the macOS 27 built-in system tools"]
+fn test_context_overflow_blocking_builtin_system_tools() {
+    let model = SystemLanguageModel::new().expect("Failed to create model");
+    assert!(model.is_available(), "Foundation Model is not available");
+
+    let session = context_overflow_session(&model);
+    let error = session
+        .respond("Say hello.", &GenerationOptions::default())
+        .expect_err("The combined built-in tool schema should exceed the context size");
+
+    assert!(
+        matches!(error, Error::ContextSizeExceeded(_)),
+        "Expected Error::ContextSizeExceeded, got {error:?}"
+    );
+}
+
+#[test]
+#[ignore = "Requires Apple Intelligence and the macOS 27 built-in system tools"]
+fn test_context_overflow_streaming_builtin_system_tools() {
+    let model = SystemLanguageModel::new().expect("Failed to create model");
+    assert!(model.is_available(), "Foundation Model is not available");
+
+    let session = context_overflow_session(&model);
+    let error = session
+        .stream_response("Say hello.", &GenerationOptions::default(), |_| {})
+        .expect_err("The combined built-in tool schema should exceed the context size");
+
+    assert!(
+        matches!(error, Error::ContextSizeExceeded(_)),
+        "Expected Error::ContextSizeExceeded, got {error:?}"
+    );
 }
 
 // ============================================================================
