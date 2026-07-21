@@ -220,27 +220,29 @@ support transcript replacement (`Session::set_transcript`) and
 
 ### Coverage
 
+**Legend:** ✅ Implemented · 🟡 Partial · ⏳ Deferred · ➖ Automatic · ❌ Out of scope
+
 | Foundation Models 27 API | Status |
 |--------------------------|--------|
-| Private Cloud Compute model, quota, availability | Implemented (`private-cloud-compute` feature) |
-| Extended reasoning via `ContextOptions` | Implemented (`respond_with_reasoning`, `_timeout`) |
-| Typed error taxonomy (`LanguageModelError`, PCC, session, model errors) | Implemented, blocking + streaming |
-| 26-era `GenerationError` bridging (macOS/iOS 26 runtimes) | Implemented — same typed errors on all runtimes |
-| `SystemLanguageModel.contextSize` / PCC `contextSize` | Implemented (`context_size`, `ContextLimit::for_model`) |
-| Exact session token usage | Implemented (`Session::usage`, `SessionUsage::delta_since`) |
-| Per-`Response` usage property | Implemented (`Response::usage`) for blocking respond paths |
-| Python bindings parity | Implemented for typed errors, context size, usage, tool modes, attachments, system tools, transcript controls; PCC remains Rust-only |
-| Tool-calling modes (allowed/required/disallowed) | Implemented (`ToolCallingMode`) |
-| Multimodal image attachments | Implemented for blocking responds; streaming/structured variants deferred |
-| Built-in tools: Vision OCR, barcode, Spotlight search | Implemented with Apple's default configurations |
-| Built-in tool configuration (sources, guides, delegates) | Deferred — Swift delegate/closure hooks do not cross the C FFI |
-| Transcript replacement and error policy | Implemented |
-| Dynamic Profiles | Deferred — Swift result-builder DSL maps poorly onto a C FFI |
-| Custom `LanguageModel` providers / executors, including Core AI and MLX adapters | Deferred — requires Rust-side executor callbacks; architectural |
-| Foundation Models framework utilities | Deferred with Dynamic Profiles; this is a separate Swift package |
-| Foundation Models Instruments updates | Available automatically to profiled consumers; no crate API required |
-| Apple `fm` CLI, Python SDK, and Evaluations framework | Separate Apple tooling; not reimplemented by this Rust binding |
-| New on-device base model | Automatic via `SystemLanguageModel` |
+| Private Cloud Compute model, quota, availability | ✅ Implemented (`private-cloud-compute` feature) |
+| Extended reasoning via `ContextOptions` | ✅ Implemented (`respond_with_reasoning`, `_timeout`) |
+| Typed error taxonomy (`LanguageModelError`, PCC, session, model errors) | ✅ Implemented, blocking + streaming |
+| 26-era `GenerationError` bridging (macOS/iOS 26 runtimes) | ✅ Implemented — same typed errors on all runtimes |
+| `SystemLanguageModel.contextSize` / PCC `contextSize` | ✅ Implemented (`context_size`, `ContextLimit::for_model`) |
+| Exact session token usage | ✅ Implemented (`Session::usage`, `SessionUsage::delta_since`) |
+| Per-`Response` usage property | 🟡 Partial — implemented for blocking respond paths |
+| Python bindings parity | 🟡 Partial — typed errors, context size, usage, tool modes, attachments, system tools, and transcript controls are implemented; PCC remains Rust-only |
+| Tool-calling modes (allowed/required/disallowed) | ✅ Implemented (`ToolCallingMode`) |
+| Multimodal image attachments | 🟡 Partial — blocking responds implemented; streaming/structured variants deferred |
+| Built-in tools: Vision OCR, barcode, Spotlight search | ✅ Implemented with Apple's default configurations |
+| Built-in tool configuration (sources, guides, delegates) | ⏳ Deferred — Swift delegate/closure hooks do not cross the C FFI |
+| Transcript replacement and error policy | ✅ Implemented |
+| Dynamic Profiles | ⏳ Deferred — Swift result-builder DSL maps poorly onto a C FFI |
+| Custom `LanguageModel` providers / executors, including Core AI and MLX adapters | ⏳ Deferred — requires Rust-side executor callbacks; architectural |
+| Foundation Models framework utilities | ⏳ Deferred with Dynamic Profiles; this is a separate Swift package |
+| Foundation Models Instruments updates | ➖ Automatic for profiled consumers; no crate API required |
+| Apple `fm` CLI, Python SDK, and Evaluations framework | ❌ Out of scope — separate Apple tooling, not reimplemented by this Rust binding |
+| New on-device base model | ➖ Automatic via `SystemLanguageModel` |
 
 ## Runtime Notes (macOS)
 
