@@ -1469,6 +1469,7 @@ final class AsyncWaiter {
         let timeoutMsInt = timeoutMs > UInt64(Int.max) ? Int.max : Int(timeoutMs)
         if state.semaphore.wait(timeout: .now() + .milliseconds(timeoutMsInt)) == .timedOut {
             task.cancel()
+            state.semaphore.wait()
             throw TimeoutError(message: "Timed out after \(timeoutMs) ms")
         }
 

@@ -7,6 +7,7 @@
 //! - The device must support Apple Intelligence
 
 use fm_rs::{Error, GenerationOptions, ModelAvailability, Session, SystemLanguageModel};
+use std::time::Duration;
 
 // ============================================================================
 // Integration Tests (require FoundationModels to be available)
@@ -548,6 +549,62 @@ fn test_respond_json() {
     let parsed: Value = serde_json::from_str(&json_str).expect("Response should be valid JSON");
     assert!(parsed["name"].is_string(), "Should have name field");
     assert!(parsed["age"].is_number(), "Should have age field");
+}
+
+#[test]
+#[ignore = "Requires Apple Intelligence and the Foundation Models 27 runtime"]
+fn test_respond_json_timeout_releases_session_and_reports_usage() {
+    let model = SystemLanguageModel::new().expect("Failed to create model");
+    assert!(model.is_available(), "Foundation Model is not available");
+
+    let session = Session::new(&model).expect("Failed to create session");
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "answer": { "type": "string" }
+        },
+        "required": ["answer"],
+        "additionalProperties": false
+    });
+    let options = GenerationOptions::builder()
+        .temperature(0.0)
+        .max_response_tokens(32)
+        .build();
+
+    let timeout_error = session
+        .respond_json_with_timeout(
+            "Return the answer timeout as JSON.",
+            &schema,
+            &options,
+            Duration::from_millis(1),
+        )
+        .expect_err("The first response should exceed a 1 ms timeout");
+    assert!(
+        matches!(timeout_error, Error::Timeout(_)),
+        "Expected Error::Timeout, got {timeout_error:?}"
+    );
+
+    let response = session
+        .respond_json_with_timeout(
+            "Return the answer ready as JSON.",
+            &schema,
+            &options,
+            Duration::from_secs(30),
+        )
+        .expect("The session should be reusable immediately after the timeout");
+    let parsed: Value =
+        serde_json::from_str(response.content()).expect("Response should contain valid JSON");
+
+    assert!(
+        parsed["answer"]
+            .as_str()
+            .is_some_and(|answer| !answer.is_empty()),
+        "Response should contain a non-empty answer: {parsed}"
+    );
+    assert!(
+        response.usage().is_some(),
+        "Foundation Models 27 should report response usage"
+    );
 }
 
 #[test]
