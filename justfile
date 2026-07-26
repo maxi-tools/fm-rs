@@ -19,6 +19,10 @@ build-release:
 test:
     cargo test --all-features
 
+# Build and launch a separate crate that depends on fm-rs.
+test-downstream:
+    bash tests/downstream-consumer/check.sh
+
 # Run integration tests (requires Apple Intelligence device)
 test-integration:
     cargo test --all-features -- --ignored
@@ -39,8 +43,8 @@ fmt:
 fmt-check:
     cargo fmt --all -- --check
 
-# Run all checks (format, clippy, test)
-check: fmt clippy test
+# Run all checks (format, clippy, unit tests, downstream launch)
+check: fmt clippy test test-downstream
 
 # Build documentation
 doc:

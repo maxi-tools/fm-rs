@@ -1,0 +1,10 @@
+[package]
+name = "fm-rs-downstream-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+fm-rs = { path = "../../crates/fm-rs" }
+
+[workspace]

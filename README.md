@@ -257,28 +257,8 @@ support transcript replacement (`Session::set_transcript`) and
 - FFI calls are synchronous. Use `spawn_blocking` in async runtimes.
 - macOS 27 built-in-tool schema overflows are classified as `ContextSizeExceeded`
   on blocking and streaming paths, including the runtime's private bridged error.
-- If you see `libswift_Concurrency.dylib` load errors, add Swift rpaths in your binary crate’s `build.rs`.
-
-```rust
-use std::process::Command;
-
-fn main() {
-    println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
-
-    if let Ok(output) = Command::new("xcrun")
-        .args(["--toolchain", "default", "--find", "swift"])
-        .output()
-    {
-        let swift_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if let Some(toolchain) = std::path::Path::new(&swift_path).parent().and_then(|p| p.parent()) {
-            let lib_path = toolchain.join("lib/swift/macosx");
-            if lib_path.exists() {
-                println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_path.display());
-            }
-        }
-    }
-}
-```
+- Cargo consumers do not need to add Swift runtime rpaths to their binary
+  targets; fm-rs links the system Swift Concurrency runtime directly.
 
 ## Prompting Guidance
 

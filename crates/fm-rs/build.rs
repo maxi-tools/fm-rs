@@ -3,6 +3,7 @@
 //! Compiles the Swift FFI layer into a static library and links it with Rust.
 
 use std::env;
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -51,12 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Link Swift standard libraries
     if let Some(swift_lib_path) = get_swift_lib_path() {
         println!("cargo:rustc-link-search=native={swift_lib_path}");
-        // Set rpath for dynamic Swift libraries
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{swift_lib_path}");
     }
-
-    // Also add rpath for system Swift libraries (needed for Swift Concurrency on macOS 26+)
-    println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
 
     Ok(())
 }
@@ -76,6 +72,7 @@ fn compile_swift(
     let sdk_path = sdk_name.and_then(get_sdk_path);
     if let Some(path) = sdk_path.as_deref() {
         emit_sdk_change_tracking(std::path::Path::new(path));
+        write_swift_concurrency_link_stub(std::path::Path::new(path), out_dir)?;
     }
     let sdk_version = sdk_name.and_then(get_sdk_version);
     let private_cloud_compute = env::var_os("CARGO_FEATURE_PRIVATE_CLOUD_COMPUTE").is_some();
@@ -297,6 +294,30 @@ fn emit_sdk_change_tracking(sdk_path: &std::path::Path) {
             contents_path.join("version.plist").display()
         );
     }
+}
+
+/// Removes the concurrency back-deployment install-name override from the SDK
+/// stub used by downstream Rust links.
+///
+/// Rust's macOS target defaults to an older deployment version, so the SDK
+/// rewrites this one Swift runtime dependency to `@rpath`. The Foundation
+/// Models framework requires macOS 26, where the runtime is in the dyld cache.
+/// Using the SDK's current absolute install name avoids requiring link flags
+/// from every final binary crate.
+fn write_swift_concurrency_link_stub(
+    sdk_path: &std::path::Path,
+    out_dir: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const PREVIOUS_INSTALL_NAME: &str = "$ld$previous$@rpath/libswift_Concurrency.dylib";
+    const DISABLED_INSTALL_NAME: &str =
+        "__fm_rs_disabled_previous_install_name$@rpath/libswift_Concurrency.dylib";
+
+    let source = sdk_path.join("usr/lib/swift/libswift_Concurrency.tbd");
+    println!("cargo:rerun-if-changed={}", source.display());
+    let contents = fs::read_to_string(&source)?;
+    let contents = contents.replace(PREVIOUS_INSTALL_NAME, DISABLED_INSTALL_NAME);
+    fs::write(out_dir.join("libswift_Concurrency.tbd"), contents)?;
+    Ok(())
 }
 
 fn get_sdk_name(swift_target: &str) -> Option<&'static str> {
