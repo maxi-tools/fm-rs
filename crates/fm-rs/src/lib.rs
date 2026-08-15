@@ -140,6 +140,8 @@ mod ffi;
 mod model;
 mod options;
 mod session;
+#[cfg(feature = "async")]
+mod stream;
 mod tool;
 
 /// Trait for types that can provide a JSON Schema for structured generation.
@@ -177,6 +179,8 @@ pub use crate::session::{
     Attachment, Response, Session, SessionBuilder, SessionUsage, SystemTool,
     TranscriptErrorHandlingPolicy,
 };
+#[cfg(feature = "async")]
+pub use crate::stream::{ResponseStream, collect_stream};
 pub use crate::tool::{Tool, ToolOutput};
 
 // FFI exports for Swift to call back into Rust

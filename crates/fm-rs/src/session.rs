@@ -616,7 +616,11 @@ impl Session {
         on_chunk: F,
     ) -> Result<()>
     where
-        F: FnMut(&str) + Send + 'static,
+        // No `'static`: `fm_session_stream` blocks until the Swift task
+        // finishes, so the closure only has to outlive this call. Requiring
+        // `'static` forced callers to move or clone anything they wanted to
+        // accumulate into, when a `&mut` borrow is sufficient.
+        F: FnMut(&str) + Send,
     {
         let prompt_c = CString::new(prompt)?;
         let options_json = options.to_json();
@@ -642,7 +646,7 @@ impl Session {
         }
 
         // Reclaim the state and check for errors
-        let state = unsafe { Box::from_raw(state_ptr.cast::<StreamState>()) };
+        let state = unsafe { Box::from_raw(state_ptr.cast::<StreamState<'_>>()) };
         let error = state.error.lock().map_err(|_| Error::PoisonError)?;
         if let Some((code, message)) = error.as_ref() {
             return Err(error_from_parts(*code, message.clone()));
@@ -1220,7 +1224,7 @@ impl Session {
         }
 
         // Reclaim the state and check for errors
-        let state = unsafe { Box::from_raw(state_ptr.cast::<StreamState>()) };
+        let state = unsafe { Box::from_raw(state_ptr.cast::<StreamState<'_>>()) };
         let error = state.error.lock().map_err(|_| Error::PoisonError)?;
         if let Some((code, message)) = error.as_ref() {
             return Err(error_from_parts(*code, message.clone()));
@@ -1263,7 +1267,7 @@ unsafe impl Send for Session {}
 // If you need to share a session across threads, wrap it in Arc<Mutex<Session>>.
 
 /// Type alias for the chunk callback function.
-type ChunkCallbackFn = dyn FnMut(&str) + Send;
+type ChunkCallbackFn<'a> = dyn FnMut(&str) + Send + 'a;
 
 /// An image input for Foundation Models 27 multimodal prompting.
 ///
@@ -1477,8 +1481,12 @@ pub enum TranscriptErrorHandlingPolicy {
 }
 
 /// Internal state for streaming callbacks.
-struct StreamState {
-    on_chunk: Mutex<Box<ChunkCallbackFn>>,
+///
+/// The lifetime is the caller's chunk closure. It is sound to hold a borrowed
+/// closure here because `fm_session_stream` blocks until Swift is done calling
+/// back, so this state cannot outlive the frame that created it.
+struct StreamState<'a> {
+    on_chunk: Mutex<Box<ChunkCallbackFn<'a>>>,
     error: Mutex<Option<(c_int, String)>>,
 }
 
@@ -1488,7 +1496,7 @@ extern "C" fn stream_chunk_callback(user_data: *mut c_void, chunk: *const c_char
         return;
     }
 
-    let state = unsafe { &*(user_data as *const StreamState) };
+    let state = unsafe { &*(user_data as *const StreamState<'_>) };
     let chunk_str = unsafe { CStr::from_ptr(chunk).to_string_lossy() };
 
     if let Ok(mut on_chunk) = state.on_chunk.lock() {
@@ -1507,7 +1515,7 @@ extern "C" fn stream_error_callback(user_data: *mut c_void, code: c_int, message
         return;
     }
 
-    let state = unsafe { &*(user_data as *const StreamState) };
+    let state = unsafe { &*(user_data as *const StreamState<'_>) };
     let msg = if message.is_null() {
         "Streaming error occurred (no message provided by Swift)".to_string()
     } else {

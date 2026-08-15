@@ -19,14 +19,26 @@ path = "src/lib.rs"
 serde.workspace = true
 serde_json.workspace = true
 fm-rs-derive = { workspace = true, optional = true }
+futures-core = { version = "0.3", optional = true }
+futures-util = { version = "0.3", optional = true, default-features = false }
+tokio = { version = "1", optional = true, features = ["sync"] }
 
 [dev-dependencies]
 reqwest.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+futures-util = { version = "0.3", default-features = false }
 
 [features]
 default = []
 derive = ["fm-rs-derive"]
 private-cloud-compute = []
+# Async `Stream` over the blocking streaming API. Off by default so the crate
+# keeps its zero-runtime-dependency posture for blocking callers.
+async = ["dep:futures-core", "dep:futures-util", "dep:tokio"]
+
+[[example]]
+name = "async_stream"
+required-features = ["async"]
 
 [[example]]
 name = "private_cloud_compute"
