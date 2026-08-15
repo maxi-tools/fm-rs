@@ -31,6 +31,28 @@ struct ToolCallbackData {
     active_callbacks: AtomicUsize,
 }
 
+/// Release the [`ToolCallbackData`] strong reference handed to Swift.
+///
+/// `Session::new` gives Swift ownership of one `Arc` clone via `Arc::into_raw`,
+/// so something has to give it back. `ToolDispatcher.deinit` calls this when the
+/// dispatcher is deallocated, which happens when `fm_session_free` releases the
+/// `SessionState` holding it.
+///
+/// # Safety
+///
+/// `user_data` must be either null or a pointer obtained from `Arc::into_raw`
+/// on an `Arc<ToolCallbackData>` that has not already been reclaimed. Swift
+/// calls this exactly once per dispatcher, from `deinit`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fm_rust_tool_data_free(user_data: *mut c_void) {
+    if user_data.is_null() {
+        return;
+    }
+    // Drops one strong reference. The `Arc` in `Session::tool_callback_data`
+    // holds the other, so whichever side goes last frees the allocation.
+    drop(unsafe { Arc::from_raw(user_data as *const ToolCallbackData) });
+}
+
 /// RAII guard to track active callbacks.
 struct CallbackGuard<'a>(&'a AtomicUsize);
 
@@ -1228,9 +1250,12 @@ impl Drop for Session {
             ffi::fm_session_free(self.ptr.as_ptr());
         }
 
-        // The Arc in tool_callback_data will be dropped automatically.
-        // Swift also holds an Arc clone (via Arc::into_raw), which will be
-        // reclaimed when Swift's ToolDispatcher is deallocated.
+        // The Arc in tool_callback_data drops automatically. Swift holds a
+        // second strong reference (handed over by Arc::into_raw in `new`), and
+        // gives it back from `ToolDispatcher.deinit` via
+        // `fm_rust_tool_data_free` — reached by the `fm_session_free` above
+        // releasing the SessionState that owns the dispatcher. Whichever side
+        // drops last frees the allocation.
     }
 }
 
