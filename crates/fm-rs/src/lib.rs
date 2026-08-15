@@ -94,9 +94,11 @@
 //!
 //! - **Ownership**: [`Session`] owns its underlying Swift `LanguageModelSession`. When
 //!   a `Session` is dropped, the Swift session is freed.
-//! - **Thread Safety**: Both [`SystemLanguageModel`] and [`Session`] are `Send + Sync`.
-//!   They can be shared across threads, though concurrent calls to the same session
-//!   may block waiting for the model.
+//! - **Thread Safety**: [`Session`] is `Send` but **not** `Sync` — streaming
+//!   callbacks use internal mutable state. Move a session between threads
+//!   freely; to share one, wrap it in `Arc<Mutex<Session>>`. Note that a
+//!   blocking call holds the mutex for its whole duration, so a second thread
+//!   cannot call [`Session::cancel`] on a session it is sharing that way.
 //! - **Drop Behavior**: Dropping a `Session` with active tool callbacks will wait
 //!   (up to 1 second) for in-flight callbacks to complete before freeing resources.
 //!
