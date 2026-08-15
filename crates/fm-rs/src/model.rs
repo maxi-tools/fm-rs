@@ -175,11 +175,41 @@ pub struct SystemLanguageModel {
     handle: ModelHandle,
 }
 
+/// Where a [`TokenUsage`] count came from.
+///
+/// The 26.4+ APIs return a real count from the model's own tokenizer. Older
+/// runtimes report a sentinel instead, and this crate falls back to a
+/// characters-per-token heuristic. Both used to arrive as a bare `usize`, so a
+/// caller measuring context headroom or benchmarking throughput could not tell
+/// a measurement from a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenCountSource {
+    /// Counted by the framework's tokenizer.
+    Exact,
+    /// Derived from character count (4 chars/token)
+    /// because the runtime did not report one.
+    Estimated,
+}
+
 /// Token usage returned by `SystemLanguageModel` 26.4+ APIs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenUsage {
-    /// Number of tokens reported by the framework.
+    /// Number of tokens reported by the framework, or estimated from character
+    /// count — see [`TokenUsage::source`].
     pub token_count: usize,
+    /// Whether `token_count` was measured or estimated.
+    pub source: TokenCountSource,
+}
+
+impl TokenUsage {
+    /// Whether this count came from the framework's tokenizer.
+    ///
+    /// Prefer this over trusting `token_count` blindly when the number feeds a
+    /// benchmark, a context-limit decision, or anything a user will read as a
+    /// measurement.
+    pub fn is_exact(&self) -> bool {
+        matches!(self.source, TokenCountSource::Exact)
+    }
 }
 
 impl SystemLanguageModel {
@@ -251,6 +281,7 @@ impl SystemLanguageModel {
         if token_count == TOKEN_USAGE_UNAVAILABLE_SENTINEL {
             return Ok(TokenUsage {
                 token_count: estimate_tokens(prompt, TOKEN_ESTIMATE_CHARS_PER_TOKEN),
+                source: TokenCountSource::Estimated,
             });
         }
 
@@ -297,6 +328,7 @@ impl SystemLanguageModel {
                 });
             return Ok(TokenUsage {
                 token_count: fallback,
+                source: TokenCountSource::Estimated,
             });
         }
 
@@ -511,7 +543,10 @@ fn token_usage_from_raw(token_count: i64) -> Result<TokenUsage> {
     let token_count = usize::try_from(token_count)
         .map_err(|_| Error::InternalError("Token usage value does not fit in usize".to_string()))?;
 
-    Ok(TokenUsage { token_count })
+    Ok(TokenUsage {
+        token_count,
+        source: TokenCountSource::Exact,
+    })
 }
 
 fn estimate_tokens(text: &str, chars_per_token: usize) -> usize {
@@ -619,7 +654,8 @@ mod tests {
     use crate::error::Error;
     use crate::ffi::{AvailabilityCode, ErrorCode};
     use crate::model::{
-        ModelAvailability, error_from_parts, estimate_tokens, token_usage_from_raw,
+        ModelAvailability, TokenCountSource, TokenUsage, error_from_parts, estimate_tokens,
+        token_usage_from_raw,
     };
     #[cfg(feature = "private-cloud-compute")]
     use crate::model::{QuotaStatus, quota_usage_from_json, unix_seconds_to_system_time};
@@ -691,6 +727,29 @@ mod tests {
     fn token_usage_should_reject_negative_values() {
         let err = token_usage_from_raw(-1).expect_err("negative token count should fail");
         assert!(err.to_string().contains("negative token count"));
+    }
+
+    #[test]
+    fn token_usage_from_raw_is_marked_exact() {
+        let usage = token_usage_from_raw(42).expect("valid count");
+        assert_eq!(usage.token_count, 42);
+        assert_eq!(usage.source, TokenCountSource::Exact);
+        assert!(usage.is_exact());
+    }
+
+    #[test]
+    fn estimated_usage_is_distinguishable_from_measured() {
+        // The point of the enum: a caller must be able to tell a heuristic from
+        // a tokenizer result. Same count, different provenance.
+        let measured = token_usage_from_raw(3).expect("valid count");
+        let guessed = TokenUsage {
+            token_count: 3,
+            source: TokenCountSource::Estimated,
+        };
+        assert_eq!(measured.token_count, guessed.token_count);
+        assert_ne!(measured, guessed);
+        assert!(measured.is_exact());
+        assert!(!guessed.is_exact());
     }
 
     #[test]
