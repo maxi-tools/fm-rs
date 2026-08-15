@@ -1,0 +1,19 @@
+crates/fm-rs/src/model.rs
+  s_dc56235329a0b3::t_c6c8f5770f47a4 733-754
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "e51ebc2e1cec2c03ec54aecc92986413d45641a5",
+  "prompts": {},
+  "sessions": {
+    "s_dc56235329a0b3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "17430e63-47de-4491-9c7b-dc016bcff93b",
+        "model": "claude-opus-5"
+      },
+      "human_author": "maxi boch <maxi@maxibookair26black.warbler-tawny.ts.net>"
+    }
+  }
+}
