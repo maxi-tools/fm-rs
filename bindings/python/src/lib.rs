@@ -20,6 +20,14 @@
 //! print(response.content)
 //! ```
 
+// `#[pyclass(from_py_object)]` expands to an impl that clones the wrapped
+// value. On classes that derive `Copy` that trips `clippy::clone_on_copy`,
+// which fails the `-D warnings` clippy lanes. The clone is emitted by the
+// pyo3 macro, not written here, so an item-level `#[allow]` does not cover it.
+// Fixed upstream in pyo3 0.29.3 (PyO3#6309); not backported to the 0.28.x
+// line this crate depends on.
+#![allow(clippy::clone_on_copy)]
+
 mod context;
 mod error;
 mod model;
