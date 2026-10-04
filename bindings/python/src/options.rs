@@ -3,15 +3,6 @@
 use pyo3::prelude::*;
 
 /// Sampling strategy for token generation.
-// `from_py_object` expands inside pyo3 0.28's proc macro to a conversion
-// that clones the source value. On a type that also derives `Copy`,
-// `clippy::clone_on_copy` fires against the expansion and clippy maps the
-// span back to this attribute -- so the "remove the clone" help text
-// points at a call we do not write and cannot edit. Scoped to this item
-// rather than to the crate: only types deriving both `Clone` and `Copy`
-// trigger it, and a blanket crate-level allow would hide a genuine
-// clone-on-copy in hand-written code here.
-#[allow(clippy::clone_on_copy)]
 #[pyclass(eq, eq_int, module = "fm", from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sampling {

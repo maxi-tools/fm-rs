@@ -17,3 +17,22 @@ pyo3 = { version = "0.28", features = ["extension-module", "abi3-py310"] }
 
 [lints]
 workspace = true
+
+[lints.clippy]
+# `clippy::clone_on_copy` is allowed for this PACKAGE, not for the workspace and
+# not crate-wide in lib.rs, because the lint fires inside a proc-macro
+# expansion: pyo3 0.28's `from_py_object` expands to a conversion that clones
+# the source value, and on a type that also derives `Copy` clippy reports it
+# against the `#[pyclass(...)]` attribute -- so the "remove the clone" help text
+# points at a call we do not write and cannot edit.
+#
+# An item-level `#[allow(clippy::clone_on_copy)]` on each affected type does NOT
+# suppress this: the lint is attributed to the expansion, not to the annotated
+# item, so the allow never reaches it. Verified on CI -- the three item-level
+# allows were tried first and the lint still fired at all three sites
+# (fm-rs PR #2, run 37212318944).
+#
+# Package scope is the narrowest level that actually works. It covers this
+# crate's ~8 source files, and the alternative -- the workspace level -- would
+# silence a genuine clone-on-copy in every crate in the workspace.
+clone_on_copy = "allow"
