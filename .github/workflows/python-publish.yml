@@ -112,23 +112,29 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      # actions/setup-python is deliberately NOT used on the self-hosted Mac
+      # lanes -- see .github/scripts/provision-python.sh for the mkdir
+      # /Users/runner failure it produces on these runners and why no setting
+      # on the action avoids it. The venv it builds is per-job because these
+      # runners are persistent.
+      - name: Provision Python
+        run: bash .github/scripts/provision-python.sh
 
       - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
           working-directory: bindings/python
           target: aarch64-apple-darwin
-          args: --release --out dist
+          # Explicit interpreter, same reason as ci.yml: do not let maturin
+          # guess which Python it is building the wheel against.
+          args: --release --out dist -i ${{ env.FM_PYTHON }}
           maturin-version: ${{ env.MATURIN_VERSION }}
 
+      # `$FM_PYTHON -m pip`, never a bare `pip`: see the same note in ci.yml.
       - name: Test wheel installation
         run: |
-          pip install bindings/python/dist/*.whl
-          DYLD_LIBRARY_PATH=/usr/lib/swift python -c "import fm; print(f'fm version: {fm.__name__}')"
+          "$FM_PYTHON" -m pip install bindings/python/dist/*.whl
+          DYLD_LIBRARY_PATH=/usr/lib/swift "$FM_PYTHON" -c "import fm; print(f'fm version: {fm.__name__}')"
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4

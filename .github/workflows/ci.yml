@@ -186,10 +186,13 @@ jobs:
           toolchain: stable
           components: clippy
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      # actions/setup-python is deliberately NOT used on the self-hosted Mac
+      # lanes -- see .github/scripts/provision-python.sh for the mkdir
+      # /Users/runner failure it produces on these runners and why no setting
+      # on the action avoids it. The venv it builds is per-job because these
+      # runners are persistent.
+      - name: Provision Python
+        run: bash .github/scripts/provision-python.sh
 
       - name: Check clippy
         run: cargo clippy -p fm-python --all-features -- -D warnings
@@ -198,16 +201,24 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           working-directory: bindings/python
-          args: --release --out dist
+          # `-i $FM_PYTHON` rather than relying on the venv being first on PATH:
+          # maturin resolves the interpreter to build the wheel against, and
+          # guessing which one it picked is how a wheel ends up tagged for a
+          # Python the tests then cannot import.
+          args: --release --out dist -i ${{ env.FM_PYTHON }}
           maturin-version: '1.11.5'
 
+      # `$FM_PYTHON -m pip`, never a bare `pip`: the provisioning step also puts
+      # Homebrew's bin on PATH, so a bare `pip` can resolve to the machine's
+      # interpreter and install into a shared persistent box. Going through the
+      # interpreter makes the target the venv regardless of PATH order.
       - name: Test wheel installation
         run: |
-          pip install bindings/python/dist/*.whl
-          DYLD_LIBRARY_PATH=/usr/lib/swift python -c "import fm; print(f'Imported: {fm.SystemLanguageModel}')"
+          "$FM_PYTHON" -m pip install bindings/python/dist/*.whl
+          DYLD_LIBRARY_PATH=/usr/lib/swift "$FM_PYTHON" -c "import fm; print(f'Imported: {fm.SystemLanguageModel}')"
 
       - name: Run Python tests
         working-directory: bindings/python
         run: |
-          pip install pytest
-          DYLD_LIBRARY_PATH=/usr/lib/swift pytest tests/ -v
+          "$FM_PYTHON" -m pip install pytest
+          DYLD_LIBRARY_PATH=/usr/lib/swift "$FM_PYTHON" -m pytest tests/ -v
