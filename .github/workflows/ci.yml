@@ -1,3 +1,54 @@
+# fm-rs CI.
+#
+# RUNNER POSTURE (2026-10-04, mac2linux audit)
+# --------------------------------------------
+# Every job here used to run on a GitHub-hosted runner: `ubuntu-latest` for the
+# cheap lanes and `macos-26` for the three that need FoundationModels.framework.
+# Hosted runners bill Actions minutes, and the fleet rule is zero hosted minutes
+# outside the external runner-freeze watchdog. So all of them are self-hosted now.
+#
+# WHY THE MAC LANES STAY ON MACS. This is a public crate and there is no way to
+# make `check`/`docs`/`python-bindings` portable: FoundationModels.framework
+# first shipped in macOS 26, the Python bindings pin MACOSX_DEPLOYMENT_TARGET
+# 26.0, and `cfg(target_os = "macos")` blocks are not resolved at all on Linux.
+# Linux is not a cheaper substitute here, it is a different (unbuildable) target.
+#
+# WHY `[self-hosted, macOS, ARM64]` AND NOT A `xcode26` PIN. The obvious tighter
+# label is wrong in both directions. `xcode26` currently resolves to exactly two
+# boxes (maxibookair24, maximini23), so pinning it turns a 15-box pool into a
+# 2-box queue for no correctness gain: the requirement is "Apple Silicon on
+# macOS 26 or newer", the fleet is entirely at 26.5+ (measured 2026-10-04 by
+# fleet-maintenance's observed.json: lowest is maxibookair24 at 26.5.2, highest
+# is 27.0.1), and a newer SDK than the deployment target is the normal supported
+# configuration -- Xcode 27 building for a 26.0 deployment target is what a
+# developer does locally. The `preflight` step below turns the one case that
+# would matter -- a box that drifts BACKWARD below 26 -- into a loud failure
+# with the measured version in the log, instead of a confusing link error.
+# `ci/runner-labels.toml` already warns that a stale `xcode26` outlives the
+# Xcode it named; not depending on it is cheaper than auditing it.
+#
+# POOL AND FALLBACK. No fallback to a hosted runner, deliberately: an unresolved
+# label means QUEUE, and a queue on this repo's cadence (a handful of PRs a
+# month) is cheaper than hosted minutes. `vars.FM_RS_MACOS_RUNS_ON` /
+# `vars.FM_RS_LINUX_RUNS_ON` let the operator retarget the pool without a PR.
+#
+# TRUST GATE, and why it lives in `if:` + `runs-on` rather than in a gate job.
+# This repo is PUBLIC, so a fork pull request is a real event and its merge
+# commit supplies this whole file -- including any `run:` block in it. A gate
+# JOB that decided trust and then handed its output to the Mac lanes would still
+# be running the fork's own shell on a persistent runner to produce that output,
+# which is the thing to avoid. Evaluated as workflow expressions instead, the
+# event context comes from the runner manager rather than from the fork, and a
+# job whose `if:` is false never schedules at all -- so no fork-authored bytes
+# execute anywhere. Untrusted PRs land on `ubuntu-latest`: the deliberate cost,
+# identical to what `.github/workflows/qodana.yml` already does here and what
+# maxi-config's own workflows document, because silently skipping CI on a public
+# repo is worse than an advisory lane on a cheap runner.
+#
+# This closes the DECLARED lanes only. A fork PR can still add a job that was
+# never here; that boundary is the org-level "self-hosted runners for fork pull
+# requests" setting plus required approval for outside contributors.
+
 name: CI
 
 on:
@@ -10,10 +61,18 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Format check (runs on any platform)
+  # Same trust predicate as the Mac lanes, kept in step with them: cheap lanes
+  # on a persistent Linux box are the same trust question as expensive lanes on
+  # a persistent Mac, and answering it two ways in one file is how one of them
+  # drifts.
   fmt:
     name: Format
-    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' &&
+       github.event.pull_request.author_association != 'CONTRIBUTOR')
+    runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' && github.event.pull_request.author_association != 'CONTRIBUTOR')) && fromJSON(vars.FM_RS_LINUX_RUNS_ON || '["self-hosted","Linux","X64"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -23,12 +82,20 @@ jobs:
           cache: false
       - run: cargo fmt --all -- --check
 
-  # Clippy and tests (macOS 26 Tahoe ARM64 - requires FoundationModels.framework)
+  # Clippy and tests (Apple Silicon macOS 26+ -- requires FoundationModels.framework)
   check:
     name: Check & Test
-    runs-on: macos-26
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' &&
+       github.event.pull_request.author_association != 'CONTRIBUTOR')
+    runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' && github.event.pull_request.author_association != 'CONTRIBUTOR')) && fromJSON(vars.FM_RS_MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v6
+
+      - name: Preflight
+        run: bash .github/scripts/preflight-macos.sh
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -45,12 +112,20 @@ jobs:
       - name: Run downstream consumer
         run: bash tests/downstream-consumer/check.sh
 
-  # Build documentation (macOS 26 for FoundationModels.framework)
+  # Build documentation (macOS 26+ for FoundationModels.framework)
   docs:
     name: Documentation
-    runs-on: macos-26
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' &&
+       github.event.pull_request.author_association != 'CONTRIBUTOR')
+    runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' && github.event.pull_request.author_association != 'CONTRIBUTOR')) && fromJSON(vars.FM_RS_MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v6
+
+      - name: Preflight
+        run: bash .github/scripts/preflight-macos.sh
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -65,7 +140,12 @@ jobs:
   # Derive crate can be checked on Linux (no Swift dependency)
   derive-check:
     name: Derive Crate (Linux)
-    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' &&
+       github.event.pull_request.author_association != 'CONTRIBUTOR')
+    runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' && github.event.pull_request.author_association != 'CONTRIBUTOR')) && fromJSON(vars.FM_RS_LINUX_RUNS_ON || '["self-hosted","Linux","X64"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -84,13 +164,21 @@ jobs:
   # Python bindings (requires macOS 26 for FoundationModels.framework)
   python-bindings:
     name: Python Bindings
-    runs-on: macos-26
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' &&
+       github.event.pull_request.author_association != 'CONTRIBUTOR')
+    runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' && github.event.pull_request.author_association != 'CONTRIBUTOR')) && fromJSON(vars.FM_RS_MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
     env:
       MACOSX_DEPLOYMENT_TARGET: '26.0'
       # rust-lang/rust#157750: avoid malformed stripped Mach-O string tables.
       CARGO_PROFILE_RELEASE_STRIP: none
     steps:
       - uses: actions/checkout@v6
+
+      - name: Preflight
+        run: bash .github/scripts/preflight-macos.sh
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
