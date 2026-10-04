@@ -7,6 +7,10 @@ use pyo3::prelude::*;
 use crate::error::to_py_err;
 
 /// Represents the availability status of a `FoundationModel`.
+// pyo3's `from_py_object` expansion clones the wrapped value; for `Copy` classes
+// that trips `clippy::clone_on_copy` under `-D warnings`. Fixed upstream in pyo3
+// 0.29.3 (PyO3#6309); not backported to the 0.28.x line we depend on.
+#[allow(clippy::clone_on_copy)]
 #[pyclass(eq, eq_int, module = "fm", from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelAvailability {

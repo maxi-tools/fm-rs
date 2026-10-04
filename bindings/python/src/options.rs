@@ -3,6 +3,10 @@
 use pyo3::prelude::*;
 
 /// Sampling strategy for token generation.
+// See the note on `ModelAvailability`: pyo3 0.28's `from_py_object` expansion
+// trips `clippy::clone_on_copy` on `Copy` classes; fixed upstream in 0.29.3
+// (PyO3#6309) but not backported to 0.28.x.
+#[allow(clippy::clone_on_copy)]
 #[pyclass(eq, eq_int, module = "fm", from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sampling {
