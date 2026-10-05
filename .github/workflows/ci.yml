@@ -221,6 +221,14 @@ jobs:
       - name: Provision Python
         run: bash .github/scripts/provision-python.sh
 
+      # Pins the native-prefix preference in provision-python.sh, which cannot
+      # be observed from this lane: this runner happens to have only one
+      # Homebrew prefix, so the dual-install case that picks an Intel
+      # interpreter for the aarch64 wheel build never arises here. The test
+      # builds that layout synthetically.
+      - name: Test interpreter selection
+        run: bash tests/scripts/test-provision-python.sh
+
       - name: Check clippy
         run: cargo clippy -p fm-python --all-features -- -D warnings
 

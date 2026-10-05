@@ -55,8 +55,18 @@ provision_error() {
 #
 # So the prefix is chosen ONCE, native first, and only that one is prepended.
 # The other stays reachable via the runner's own PATH when it is there.
+#
+# NATIVE_PREFIX is then load-bearing rather than cosmetic. Prepending the native
+# directory is NOT on its own enough: PATH resolution walks the whole path per
+# NAME, so a native prefix that ships `python3` but no `python3.11` still lets
+# the candidate loop below find an Intel `python3.11` further along. The
+# candidate search therefore runs TWICE -- once restricted to the native prefix,
+# once over PATH -- so the native prefix is exhausted for every candidate before
+# any other directory is considered at all.
+NATIVE_PREFIX=""
 for d in /opt/homebrew/bin /usr/local/bin; do
   if [[ -d "$d" ]]; then
+    NATIVE_PREFIX="$d"
     echo "$d" >> "$GITHUB_PATH"
     PATH="$d:$PATH"
     export PATH
@@ -69,13 +79,34 @@ done
 # An explicit 3.11 is what the workflows asked for on the hosted image, so it is
 # tried first and the machine's own python3 is the fallback. Preferring 3.11
 # keeps the local and CI interpreters comparable without requiring it.
-PY=""
-for candidate in python3.11 python3; do
-  if command -v "$candidate" >/dev/null 2>&1; then
-    PY="$(command -v "$candidate")"
-    break
+#
+# TWO SEPARATE PASSES, in this order: the native prefix is exhausted for every
+# candidate before PATH is consulted at all. Interleaving them per candidate
+# does not work -- the loop would reach the PATH search for `python3.11` before
+# it ever offered the native `python3`, and pick the Intel one. `command -v`
+# cannot express "only look in this directory", so the native pass checks the
+# prefix directly.
+select_interpreter() {
+  local candidate found
+  if [[ -n "$NATIVE_PREFIX" ]]; then
+    for candidate in python3.11 python3; do
+      if [[ -x "$NATIVE_PREFIX/$candidate" ]]; then
+        printf '%s\n' "$NATIVE_PREFIX/$candidate"
+        return 0
+      fi
+    done
   fi
-done
+  for candidate in python3.11 python3; do
+    if found="$(command -v "$candidate" 2>/dev/null)"; then
+      printf '%s\n' "$found"
+      return 0
+    fi
+  done
+  return 1
+}
+
+PY=""
+PY="$(select_interpreter)" || PY=""
 [[ -n "$PY" ]] || provision_error "no python3 on this box. This lane needs a machine-provided interpreter; actions/setup-python is not used here because it cannot write its tool cache on these runners."
 
 version="$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
