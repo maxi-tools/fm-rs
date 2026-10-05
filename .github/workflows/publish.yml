@@ -30,6 +30,8 @@ jobs:
   # Verify the tag matches Cargo.toml version
   verify:
     name: Verify Release
+    permissions:
+      contents: read
     runs-on: ${{ fromJSON(vars.FM_RS_MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') }}
     outputs:
       version: ${{ steps.version.outputs.version }}

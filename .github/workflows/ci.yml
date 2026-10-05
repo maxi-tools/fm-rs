@@ -81,6 +81,8 @@ jobs:
   # be unreachable -- see the header.
   fmt:
     name: Format
+    permissions:
+      contents: read
     runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' && github.event.pull_request.author_association != 'CONTRIBUTOR')) && fromJSON(vars.FM_RS_LINUX_RUNS_ON || '["self-hosted","Linux","X64"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v6
@@ -100,6 +102,8 @@ jobs:
   # `derive-check` still give those PRs hosted-runner coverage.
   check:
     name: Check & Test
+    permissions:
+      contents: read
     if: >-
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
@@ -132,6 +136,8 @@ jobs:
   # Same shape as `check`: `if:` is the trust gate, `runs-on` has no fallback.
   docs:
     name: Documentation
+    permissions:
+      contents: read
     if: >-
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
@@ -160,6 +166,8 @@ jobs:
   # platform-neutral and its `ubuntu-latest` fallback is real.
   derive-check:
     name: Derive Crate (Linux)
+    permissions:
+      contents: read
     runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' && github.event.pull_request.author_association != 'CONTRIBUTOR')) && fromJSON(vars.FM_RS_LINUX_RUNS_ON || '["self-hosted","Linux","X64"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v6
@@ -181,6 +189,8 @@ jobs:
   # Same shape as `check`: `if:` is the trust gate, `runs-on` has no fallback.
   python-bindings:
     name: Python Bindings
+    permissions:
+      contents: read
     if: >-
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&

@@ -27,8 +27,9 @@
 # whatever version resolves that day. RUNNER_TEMP is per-job and is cleaned by
 # the runner, so the job is reproducible and the machine is untouched.
 #
-# Sets FM_PYTHON_BIN_DIR on stdout-adjacent GITHUB_PATH for the caller, and
-# FM_PYTHON for steps that need the interpreter by path (maturin-action does).
+# Adds the venv's `bin` directory to GITHUB_PATH for the caller, and sets
+# FM_PYTHON and VIRTUAL_ENV for steps that need the interpreter by path
+# (maturin-action does).
 
 set -euo pipefail
 
@@ -81,7 +82,11 @@ version="$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
 major="${version%%.*}"
 minor="${version##*.}"
 if (( major < MIN_MAJOR || (major == MIN_MAJOR && minor < MIN_MINOR) )); then
-  provision_error "found python $version at $PY; this crate ships an abi3-py${MIN_MINOR}0 wheel and needs >= ${MIN_MAJOR}.${MIN_MINOR}."
+  # The wheel tag is `abi3-py3${MIN_MINOR}` (abi3-py310 for MIN_MINOR=10), so
+  # the "3" is part of the tag and not something MIN_MINOR supplies. Reading it
+  # as a trailing "0" instead renders "py100" and sends whoever reads the
+  # message looking for a tag that does not exist.
+  provision_error "found python $version at $PY; this crate ships an abi3-py3${MIN_MINOR} wheel and needs >= ${MIN_MAJOR}.${MIN_MINOR}."
 fi
 
 VENV="${RUNNER_TEMP:?RUNNER_TEMP is unset; this script only runs inside Actions}/fm-venv"
