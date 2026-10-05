@@ -1,3 +1,22 @@
+# Publish Python Package
+#
+# RUNNER POSTURE (2026-10-04, mac2linux audit) -- same shape as ci.yml, and the
+# reasoning lives there in full. Briefly: hosted runners bill Actions minutes,
+# and the fleet rule is zero hosted minutes outside the external runner-freeze
+# watchdog, so `macos-26` and `ubuntu-latest` here are both self-hosted now.
+#
+# The wheel build is Apple-Silicon-macOS-26-gated (FoundationModels.framework,
+# MACOSX_DEPLOYMENT_TARGET 26.0), so it stays on the Mac pool with a preflight
+# step; the pure-Linux jobs (publish, upload-release-assets) move to the Linux
+# pool.
+#
+# TRUST. `workflow_dispatch` accepts any ref, and this workflow's `publish` job
+# holds `id-token: write` for OIDC trusted publishing to PyPI. Dispatch is
+# therefore pinned to the owner id and the default branch's workflow file, the
+# same construct maxi-config uses on every privileged fleet job: a dispatch from
+# a branch would otherwise execute unreviewed code on a persistent runner with a
+# publish token behind it. Tag pushes need write access and carry no predicate.
+
 name: Publish Python Package
 
 on:
@@ -22,12 +41,27 @@ jobs:
   # Verify the tag matches pyproject.toml version
   verify:
     name: Verify Release
-    runs-on: macos-26
+    permissions:
+      contents: read
+    # Owner-only dispatch: `publish: true` from a non-owner, or from any branch,
+    # builds but does not publish. This is a job-level predicate rather than a
+    # `runs-on` expression because this job holds no credentials -- it is the
+    # `publish` job below, and only that one, that must not be reachable. For
+    # the same reason `runs-on` carries no `ubuntu-latest` fallback: a false
+    # `if:` skips the job before `runs-on` is evaluated, so a fallback here
+    # would be unreachable, and this job's preflight needs macOS regardless.
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      (github.event.sender.id == 874012 && github.ref == 'refs/heads/main')
+    runs-on: ${{ fromJSON(vars.FM_RS_MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') }}
     outputs:
       version: ${{ steps.version.outputs.version }}
       should_publish: ${{ steps.check.outputs.should_publish }}
     steps:
       - uses: actions/checkout@v6
+
+      - name: Preflight
+        run: bash .github/scripts/preflight-macos.sh
 
       - name: Determine version and publish status
         id: version
@@ -63,8 +97,15 @@ jobs:
   # Build macOS ARM64 wheel (Apple Silicon only - FoundationModels.framework requirement)
   build-macos-arm64:
     name: Build macOS ARM64
+    permissions:
+      contents: read
     needs: verify
-    runs-on: macos-26
+    # Same owner-only dispatch predicate as `verify`, and the same reason there
+    # is no `runs-on` fallback behind it.
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      (github.event.sender.id == 874012 && github.ref == 'refs/heads/main')
+    runs-on: ${{ fromJSON(vars.FM_RS_MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') }}
     env:
       MACOSX_DEPLOYMENT_TARGET: '26.0'
       # rust-lang/rust#157750: avoid malformed stripped Mach-O string tables.
@@ -72,28 +113,37 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Preflight
+        run: bash .github/scripts/preflight-macos.sh
+
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      # actions/setup-python is deliberately NOT used on the self-hosted Mac
+      # lanes -- see .github/scripts/provision-python.sh for the mkdir
+      # /Users/runner failure it produces on these runners and why no setting
+      # on the action avoids it. The venv it builds is per-job because these
+      # runners are persistent.
+      - name: Provision Python
+        run: bash .github/scripts/provision-python.sh
 
       - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
           working-directory: bindings/python
           target: aarch64-apple-darwin
-          args: --release --out dist
+          # Explicit interpreter, same reason as ci.yml: do not let maturin
+          # guess which Python it is building the wheel against.
+          args: --release --out dist -i ${{ env.FM_PYTHON }}
           maturin-version: ${{ env.MATURIN_VERSION }}
 
+      # `$FM_PYTHON -m pip`, never a bare `pip`: see the same note in ci.yml.
       - name: Test wheel installation
         run: |
-          pip install bindings/python/dist/*.whl
-          DYLD_LIBRARY_PATH=/usr/lib/swift python -c "import fm; print(f'fm version: {fm.__name__}')"
+          "$FM_PYTHON" -m pip install bindings/python/dist/*.whl
+          DYLD_LIBRARY_PATH=/usr/lib/swift "$FM_PYTHON" -c "import fm; print(f'fm version: {fm.__name__}')"
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4
@@ -105,10 +155,20 @@ jobs:
   # Build source distribution
   build-sdist:
     name: Build Source Distribution
+    permissions:
+      contents: read
     needs: verify
-    runs-on: macos-26
+    # Same owner-only dispatch predicate as `verify`, and the same reason there
+    # is no `runs-on` fallback behind it.
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      (github.event.sender.id == 874012 && github.ref == 'refs/heads/main')
+    runs-on: ${{ fromJSON(vars.FM_RS_MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') }}
     steps:
       - uses: actions/checkout@v6
+
+      - name: Preflight
+        run: bash .github/scripts/preflight-macos.sh
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1
@@ -129,8 +189,15 @@ jobs:
   publish:
     name: Publish to PyPI
     needs: [verify, build-macos-arm64, build-sdist]
-    if: needs.verify.outputs.should_publish == 'true'
-    runs-on: ubuntu-latest
+    # The credential-bearing job, so the dispatch guard is repeated here and NOT
+    # merely inherited from `verify`: a change to `verify`'s predicate must not
+    # be able to widen this one's reach by accident. (One `if:`, folded --
+    # repeating the key would make the second a silent no-op.)
+    if: >-
+      needs.verify.outputs.should_publish == 'true' &&
+      (github.event_name != 'workflow_dispatch' ||
+       (github.event.sender.id == 874012 && github.ref == 'refs/heads/main'))
+    runs-on: ${{ fromJSON(vars.FM_RS_LINUX_RUNS_ON || '["self-hosted","Linux","X64"]') }}
     environment: pypi
     permissions:
       id-token: write  # Required for OIDC trusted publishing
@@ -157,7 +224,7 @@ jobs:
     name: Upload Release Assets
     needs: [verify, publish]
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.FM_RS_LINUX_RUNS_ON || '["self-hosted","Linux","X64"]') }}
     permissions:
       contents: write
     steps:

@@ -1,3 +1,67 @@
+# fm-rs CI.
+#
+# RUNNER POSTURE (2026-10-04, mac2linux audit)
+# --------------------------------------------
+# Every job here used to run on a GitHub-hosted runner: `ubuntu-latest` for the
+# cheap lanes and `macos-26` for the three that need FoundationModels.framework.
+# Hosted runners bill Actions minutes, and the fleet rule is zero hosted minutes
+# outside the external runner-freeze watchdog. So all of them are self-hosted now.
+#
+# WHY THE MAC LANES STAY ON MACS. This is a public crate and there is no way to
+# make `check`/`docs`/`python-bindings` portable: FoundationModels.framework
+# first shipped in macOS 26, the Python bindings pin MACOSX_DEPLOYMENT_TARGET
+# 26.0, and `cfg(target_os = "macos")` blocks are not resolved at all on Linux.
+# Linux is not a cheaper substitute here, it is a different (unbuildable) target.
+#
+# WHY `[self-hosted, macOS, ARM64]` AND NOT A `xcode26` PIN. The obvious tighter
+# label is wrong in both directions. `xcode26` currently resolves to exactly two
+# boxes (maxibookair24, maximini23), so pinning it turns a 15-box pool into a
+# 2-box queue for no correctness gain: the requirement is "Apple Silicon on
+# macOS 26 or newer", the fleet is entirely at 26.5+ (measured 2026-10-04 by
+# fleet-maintenance's observed.json: lowest is maxibookair24 at 26.5.2, highest
+# is 27.0.1), and a newer SDK than the deployment target is the normal supported
+# configuration -- Xcode 27 building for a 26.0 deployment target is what a
+# developer does locally. The `preflight` step below turns the one case that
+# would matter -- a box that drifts BACKWARD below 26 -- into a loud failure
+# with the measured version in the log, instead of a confusing link error.
+# `ci/runner-labels.toml` already warns that a stale `xcode26` outlives the
+# Xcode it named; not depending on it is cheaper than auditing it.
+#
+# POOL AND FALLBACK. No fallback to a hosted runner, deliberately: an unresolved
+# label means QUEUE, and a queue on this repo's cadence (a handful of PRs a
+# month) is cheaper than hosted minutes. `vars.FM_RS_MACOS_RUNS_ON` /
+# `vars.FM_RS_LINUX_RUNS_ON` let the operator retarget the pool without a PR.
+#
+# TRUST GATE. This repo is PUBLIC, so a fork pull request is a real event and
+# its merge commit supplies this whole file -- including any `run:` block in it.
+# A gate JOB that decided trust and then handed its output to these lanes would
+# still be running the fork's own shell on a persistent runner to produce that
+# output, which is the thing to avoid. So the trust decision is an expression
+# evaluated by the runner manager, out of event context the fork does not
+# control -- in TWO shapes, because the lanes below are not interchangeable:
+#
+#   * `fmt` and `derive-check` are platform-neutral, so their trust decision
+#     lives ONLY in `runs-on`: trusted PRs get the self-hosted Linux pool and
+#     everything else falls back to a GitHub-hosted `ubuntu-latest`. They carry
+#     NO job-level `if:`. A false `if:` skips a job BEFORE `runs-on` is
+#     evaluated, so pairing the two makes the advertised fallback unreachable --
+#     an untrusted PR then reports green having run nothing at all.
+#
+#   * `check`, `docs` and `python-bindings` need FoundationModels.framework and
+#     cannot build on a Linux fallback at all, so for those three `runs-on` is
+#     self-hosted-only and the trust decision is a job-level `if:` that skips the
+#     job outright. A skipped job reports success to branch protection, so an
+#     untrusted PR gets `fmt` and `derive-check` as advisory lanes on a hosted
+#     runner and no coverage of the Mac lanes: the deliberate cost, identical to
+#     what `.github/workflows/qodana.yml` already does here.
+#
+# Either way no fork-authored byte executes on a persistent self-hosted runner:
+# the hosted fallback is ephemeral and is destroyed with the job.
+#
+# This closes the DECLARED lanes only. A fork PR can still add a job that was
+# never here; that boundary is the org-level "self-hosted runners for fork pull
+# requests" setting plus required approval for outside contributors.
+
 name: CI
 
 on:
@@ -10,10 +74,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Format check (runs on any platform)
+  # No job-level `if:` here, deliberately. This lane is platform-neutral, so the
+  # hosted `ubuntu-latest` fallback in `runs-on` is a real lane for an untrusted
+  # PR rather than a promise. Adding the same predicate as a job-level `if:`
+  # would skip the job before `runs-on` is ever evaluated and the fallback would
+  # be unreachable -- see the header.
   fmt:
     name: Format
-    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' && github.event.pull_request.author_association != 'CONTRIBUTOR')) && fromJSON(vars.FM_RS_LINUX_RUNS_ON || '["self-hosted","Linux","X64"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -23,12 +93,28 @@ jobs:
           cache: false
       - run: cargo fmt --all -- --check
 
-  # Clippy and tests (macOS 26 Tahoe ARM64 - requires FoundationModels.framework)
+  # Clippy and tests (Apple Silicon macOS 26+ -- requires FoundationModels.framework)
+  #
+  # The job-level `if:` is the trust gate for this lane and the only one: a
+  # `runs-on` fallback would be a lie, because there is no Linux destination
+  # this lane can build on (FoundationModels.framework, the deployment target,
+  # and `cfg(target_os = "macos")`). Untrusted PRs skip it; `fmt` and
+  # `derive-check` still give those PRs hosted-runner coverage.
   check:
     name: Check & Test
-    runs-on: macos-26
+    permissions:
+      contents: read
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' &&
+       github.event.pull_request.author_association != 'CONTRIBUTOR')
+    runs-on: ${{ fromJSON(vars.FM_RS_MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') }}
     steps:
       - uses: actions/checkout@v6
+
+      - name: Preflight
+        run: bash .github/scripts/preflight-macos.sh
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -45,12 +131,24 @@ jobs:
       - name: Run downstream consumer
         run: bash tests/downstream-consumer/check.sh
 
-  # Build documentation (macOS 26 for FoundationModels.framework)
+  # Build documentation (macOS 26+ for FoundationModels.framework)
+  #
+  # Same shape as `check`: `if:` is the trust gate, `runs-on` has no fallback.
   docs:
     name: Documentation
-    runs-on: macos-26
+    permissions:
+      contents: read
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' &&
+       github.event.pull_request.author_association != 'CONTRIBUTOR')
+    runs-on: ${{ fromJSON(vars.FM_RS_MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') }}
     steps:
       - uses: actions/checkout@v6
+
+      - name: Preflight
+        run: bash .github/scripts/preflight-macos.sh
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -63,9 +161,14 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
   # Derive crate can be checked on Linux (no Swift dependency)
+  #
+  # No job-level `if:` here either, for the same reason as `fmt`: this lane is
+  # platform-neutral and its `ubuntu-latest` fallback is real.
   derive-check:
     name: Derive Crate (Linux)
-    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' && github.event.pull_request.author_association != 'CONTRIBUTOR')) && fromJSON(vars.FM_RS_LINUX_RUNS_ON || '["self-hosted","Linux","X64"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -82,9 +185,18 @@ jobs:
         run: cargo test -p fm-rs-derive
 
   # Python bindings (requires macOS 26 for FoundationModels.framework)
+  #
+  # Same shape as `check`: `if:` is the trust gate, `runs-on` has no fallback.
   python-bindings:
     name: Python Bindings
-    runs-on: macos-26
+    permissions:
+      contents: read
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' &&
+       github.event.pull_request.author_association != 'CONTRIBUTOR')
+    runs-on: ${{ fromJSON(vars.FM_RS_MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') }}
     env:
       MACOSX_DEPLOYMENT_TARGET: '26.0'
       # rust-lang/rust#157750: avoid malformed stripped Mach-O string tables.
@@ -92,16 +204,30 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Preflight
+        run: bash .github/scripts/preflight-macos.sh
+
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
           components: clippy
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      # actions/setup-python is deliberately NOT used on the self-hosted Mac
+      # lanes -- see .github/scripts/provision-python.sh for the mkdir
+      # /Users/runner failure it produces on these runners and why no setting
+      # on the action avoids it. The venv it builds is per-job because these
+      # runners are persistent.
+      - name: Provision Python
+        run: bash .github/scripts/provision-python.sh
+
+      # Pins the native-prefix preference in provision-python.sh, which cannot
+      # be observed from this lane: this runner happens to have only one
+      # Homebrew prefix, so the dual-install case that picks an Intel
+      # interpreter for the aarch64 wheel build never arises here. The test
+      # builds that layout synthetically.
+      - name: Test interpreter selection
+        run: bash tests/scripts/test-provision-python.sh
 
       - name: Check clippy
         run: cargo clippy -p fm-python --all-features -- -D warnings
@@ -110,16 +236,24 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           working-directory: bindings/python
-          args: --release --out dist
+          # `-i $FM_PYTHON` rather than relying on the venv being first on PATH:
+          # maturin resolves the interpreter to build the wheel against, and
+          # guessing which one it picked is how a wheel ends up tagged for a
+          # Python the tests then cannot import.
+          args: --release --out dist -i ${{ env.FM_PYTHON }}
           maturin-version: '1.11.5'
 
+      # `$FM_PYTHON -m pip`, never a bare `pip`: the provisioning step also puts
+      # Homebrew's bin on PATH, so a bare `pip` can resolve to the machine's
+      # interpreter and install into a shared persistent box. Going through the
+      # interpreter makes the target the venv regardless of PATH order.
       - name: Test wheel installation
         run: |
-          pip install bindings/python/dist/*.whl
-          DYLD_LIBRARY_PATH=/usr/lib/swift python -c "import fm; print(f'Imported: {fm.SystemLanguageModel}')"
+          "$FM_PYTHON" -m pip install bindings/python/dist/*.whl
+          DYLD_LIBRARY_PATH=/usr/lib/swift "$FM_PYTHON" -c "import fm; print(f'Imported: {fm.SystemLanguageModel}')"
 
       - name: Run Python tests
         working-directory: bindings/python
         run: |
-          pip install pytest
-          DYLD_LIBRARY_PATH=/usr/lib/swift pytest tests/ -v
+          "$FM_PYTHON" -m pip install pytest
+          DYLD_LIBRARY_PATH=/usr/lib/swift "$FM_PYTHON" -m pytest tests/ -v

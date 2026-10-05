@@ -20,6 +20,31 @@
 //! print(response.content)
 //! ```
 
+// `clippy::clone_on_copy` is allowed crate-wide here, and only here.
+//
+// pyo3 0.28's `from_py_object` expands to a conversion that clones the source
+// value. On a type that also derives `Copy`, clippy reports `clone_on_copy`
+// against the expansion and maps the span back to the `#[pyclass(...)]`
+// attribute, so its "remove the clone" help text points at a call we do not
+// write and cannot edit. ModelAvailability, Sampling and SessionUsage are the
+// three that trip it.
+//
+// Two narrower placements were tried on CI and do not work:
+//   - `#[allow(clippy::clone_on_copy)]` on each affected type: the lint is
+//     attributed to the expansion rather than to the annotated item, so the
+//     allow never reaches it (fm-rs PR #2, run 37212318944).
+//   - `[lints.clippy] clone_on_copy = "allow"` in this package's Cargo.toml:
+//     cargo refuses the manifest outright -- "cannot override `workspace.lints`
+//     in `lints`" -- because the package already says `lints.workspace = true`
+//     (run 37212722436).
+//
+// So this inner attribute is the narrowest placement that actually compiles and
+// suppresses. It is scoped to this crate's ten source files, all of them PyO3
+// glue; the alternative that would also "work" is the workspace level in the
+// root Cargo.toml, which would silence a genuine clone-on-copy in every crate
+// in the workspace including the two that have no PyO3 in them at all.
+#![allow(clippy::clone_on_copy)]
+
 mod context;
 mod error;
 mod model;

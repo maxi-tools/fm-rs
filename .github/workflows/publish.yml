@@ -1,3 +1,20 @@
+# Publish to crates.io
+#
+# RUNNER POSTURE (2026-10-04, mac2linux audit) -- same shape as ci.yml, and the
+# reasoning lives there in full. Briefly: hosted runners bill Actions minutes,
+# and the fleet rule is zero hosted minutes outside the external runner-freeze
+# watchdog, so `macos-26` and `ubuntu-latest` here are both self-hosted now.
+#
+# These lanes genuinely need an Apple Silicon Mac running macOS 26+ (they run the
+# full test suite and link FoundationModels.framework), so `macos-arm64` is the
+# correct destination rather than a cheaper substitute -- the preflight step is
+# what keeps a drifted box from reporting green for a build it could not make.
+#
+# TRUST. This workflow only triggers on tag pushes, which require write access,
+# so there is no fork-PR path here and no trust predicate is needed. The
+# publishing jobs hold `id-token: write` for OIDC trusted publishing; nothing
+# unreviewed ever reaches those on a persistent runner.
+
 name: Publish to crates.io
 
 on:
@@ -13,11 +30,16 @@ jobs:
   # Verify the tag matches Cargo.toml version
   verify:
     name: Verify Release
-    runs-on: macos-26
+    permissions:
+      contents: read
+    runs-on: ${{ fromJSON(vars.FM_RS_MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') }}
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v6
+
+      - name: Preflight
+        run: bash .github/scripts/preflight-macos.sh
 
       - name: Extract version from tag
         id: version
@@ -45,7 +67,7 @@ jobs:
   publish-derive:
     name: Publish fm-rs-derive
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.FM_RS_LINUX_RUNS_ON || '["self-hosted","Linux","X64"]') }}
     environment: crates-io
     permissions:
       id-token: write  # Required for OIDC trusted publishing
@@ -75,13 +97,17 @@ jobs:
   publish-fm-rs:
     name: Publish fm-rs
     needs: [verify, publish-derive]
-    runs-on: macos-26  # Requires macOS 26 for FoundationModels.framework
+    # Requires macOS 26+ for FoundationModels.framework
+    runs-on: ${{ fromJSON(vars.FM_RS_MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') }}
     environment: crates-io
     permissions:
       id-token: write  # Required for OIDC trusted publishing
       contents: read
     steps:
       - uses: actions/checkout@v6
+
+      - name: Preflight
+        run: bash .github/scripts/preflight-macos.sh
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -101,7 +127,7 @@ jobs:
   release:
     name: Create Release
     needs: [verify, publish-fm-rs]
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.FM_RS_LINUX_RUNS_ON || '["self-hosted","Linux","X64"]') }}
     permissions:
       contents: write
     steps:
@@ -129,4 +155,4 @@ jobs:
 
             - [docs.rs/fm-rs](https://docs.rs/fm-rs/${{ needs.verify.outputs.version }})
             - [crates.io/crates/fm-rs](https://crates.io/crates/fm-rs)
-            - [pypi.org/project/fm-rs](https://pypi.org/project/fm-rs/${{ needs.verify.outputs.version }}/)
+            - [pypi.org/project/fm-rs](https://pypi.org/project/fm-rs/${{ needs.verify.outputs.version }})
