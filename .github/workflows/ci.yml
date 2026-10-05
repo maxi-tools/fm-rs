@@ -32,18 +32,31 @@
 # month) is cheaper than hosted minutes. `vars.FM_RS_MACOS_RUNS_ON` /
 # `vars.FM_RS_LINUX_RUNS_ON` let the operator retarget the pool without a PR.
 #
-# TRUST GATE, and why it lives in `if:` + `runs-on` rather than in a gate job.
-# This repo is PUBLIC, so a fork pull request is a real event and its merge
-# commit supplies this whole file -- including any `run:` block in it. A gate
-# JOB that decided trust and then handed its output to the Mac lanes would still
-# be running the fork's own shell on a persistent runner to produce that output,
-# which is the thing to avoid. Evaluated as workflow expressions instead, the
-# event context comes from the runner manager rather than from the fork, and a
-# job whose `if:` is false never schedules at all -- so no fork-authored bytes
-# execute anywhere. Untrusted PRs land on `ubuntu-latest`: the deliberate cost,
-# identical to what `.github/workflows/qodana.yml` already does here and what
-# maxi-config's own workflows document, because silently skipping CI on a public
-# repo is worse than an advisory lane on a cheap runner.
+# TRUST GATE. This repo is PUBLIC, so a fork pull request is a real event and
+# its merge commit supplies this whole file -- including any `run:` block in it.
+# A gate JOB that decided trust and then handed its output to these lanes would
+# still be running the fork's own shell on a persistent runner to produce that
+# output, which is the thing to avoid. So the trust decision is an expression
+# evaluated by the runner manager, out of event context the fork does not
+# control -- in TWO shapes, because the lanes below are not interchangeable:
+#
+#   * `fmt` and `derive-check` are platform-neutral, so their trust decision
+#     lives ONLY in `runs-on`: trusted PRs get the self-hosted Linux pool and
+#     everything else falls back to a GitHub-hosted `ubuntu-latest`. They carry
+#     NO job-level `if:`. A false `if:` skips a job BEFORE `runs-on` is
+#     evaluated, so pairing the two makes the advertised fallback unreachable --
+#     an untrusted PR then reports green having run nothing at all.
+#
+#   * `check`, `docs` and `python-bindings` need FoundationModels.framework and
+#     cannot build on a Linux fallback at all, so for those three `runs-on` is
+#     self-hosted-only and the trust decision is a job-level `if:` that skips the
+#     job outright. A skipped job reports success to branch protection, so an
+#     untrusted PR gets `fmt` and `derive-check` as advisory lanes on a hosted
+#     runner and no coverage of the Mac lanes: the deliberate cost, identical to
+#     what `.github/workflows/qodana.yml` already does here.
+#
+# Either way no fork-authored byte executes on a persistent self-hosted runner:
+# the hosted fallback is ephemeral and is destroyed with the job.
 #
 # This closes the DECLARED lanes only. A fork PR can still add a job that was
 # never here; that boundary is the org-level "self-hosted runners for fork pull
@@ -61,17 +74,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Same trust predicate as the Mac lanes, kept in step with them: cheap lanes
-  # on a persistent Linux box are the same trust question as expensive lanes on
-  # a persistent Mac, and answering it two ways in one file is how one of them
-  # drifts.
+  # No job-level `if:` here, deliberately. This lane is platform-neutral, so the
+  # hosted `ubuntu-latest` fallback in `runs-on` is a real lane for an untrusted
+  # PR rather than a promise. Adding the same predicate as a job-level `if:`
+  # would skip the job before `runs-on` is ever evaluated and the fallback would
+  # be unreachable -- see the header.
   fmt:
     name: Format
-    if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
-       github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' &&
-       github.event.pull_request.author_association != 'CONTRIBUTOR')
     runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' && github.event.pull_request.author_association != 'CONTRIBUTOR')) && fromJSON(vars.FM_RS_LINUX_RUNS_ON || '["self-hosted","Linux","X64"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v6
@@ -83,6 +92,12 @@ jobs:
       - run: cargo fmt --all -- --check
 
   # Clippy and tests (Apple Silicon macOS 26+ -- requires FoundationModels.framework)
+  #
+  # The job-level `if:` is the trust gate for this lane and the only one: a
+  # `runs-on` fallback would be a lie, because there is no Linux destination
+  # this lane can build on (FoundationModels.framework, the deployment target,
+  # and `cfg(target_os = "macos")`). Untrusted PRs skip it; `fmt` and
+  # `derive-check` still give those PRs hosted-runner coverage.
   check:
     name: Check & Test
     if: >-
@@ -90,7 +105,7 @@ jobs:
       (github.event.pull_request.head.repo.full_name == github.repository &&
        github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' &&
        github.event.pull_request.author_association != 'CONTRIBUTOR')
-    runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' && github.event.pull_request.author_association != 'CONTRIBUTOR')) && fromJSON(vars.FM_RS_MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(vars.FM_RS_MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') }}
     steps:
       - uses: actions/checkout@v6
 
@@ -113,6 +128,8 @@ jobs:
         run: bash tests/downstream-consumer/check.sh
 
   # Build documentation (macOS 26+ for FoundationModels.framework)
+  #
+  # Same shape as `check`: `if:` is the trust gate, `runs-on` has no fallback.
   docs:
     name: Documentation
     if: >-
@@ -120,7 +137,7 @@ jobs:
       (github.event.pull_request.head.repo.full_name == github.repository &&
        github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' &&
        github.event.pull_request.author_association != 'CONTRIBUTOR')
-    runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' && github.event.pull_request.author_association != 'CONTRIBUTOR')) && fromJSON(vars.FM_RS_MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(vars.FM_RS_MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') }}
     steps:
       - uses: actions/checkout@v6
 
@@ -138,13 +155,11 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
   # Derive crate can be checked on Linux (no Swift dependency)
+  #
+  # No job-level `if:` here either, for the same reason as `fmt`: this lane is
+  # platform-neutral and its `ubuntu-latest` fallback is real.
   derive-check:
     name: Derive Crate (Linux)
-    if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
-       github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' &&
-       github.event.pull_request.author_association != 'CONTRIBUTOR')
     runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' && github.event.pull_request.author_association != 'CONTRIBUTOR')) && fromJSON(vars.FM_RS_LINUX_RUNS_ON || '["self-hosted","Linux","X64"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v6
@@ -162,6 +177,8 @@ jobs:
         run: cargo test -p fm-rs-derive
 
   # Python bindings (requires macOS 26 for FoundationModels.framework)
+  #
+  # Same shape as `check`: `if:` is the trust gate, `runs-on` has no fallback.
   python-bindings:
     name: Python Bindings
     if: >-
@@ -169,7 +186,7 @@ jobs:
       (github.event.pull_request.head.repo.full_name == github.repository &&
        github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' &&
        github.event.pull_request.author_association != 'CONTRIBUTOR')
-    runs-on: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR' && github.event.pull_request.author_association != 'CONTRIBUTOR')) && fromJSON(vars.FM_RS_MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(vars.FM_RS_MACOS_RUNS_ON || '["self-hosted","macOS","ARM64"]') }}
     env:
       MACOSX_DEPLOYMENT_TARGET: '26.0'
       # rust-lang/rust#157750: avoid malformed stripped Mach-O string tables.

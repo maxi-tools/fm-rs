@@ -43,11 +43,25 @@ provision_error() {
 # Homebrew installs under /opt/homebrew on Apple Silicon and /usr/local on
 # Intel, and these runners are invoked with a PATH that does not reliably carry
 # either -- the same probe coreml-rs's review workflow uses.
+#
+# ORDER MATTERS, and prepending in the loop is how it went wrong once. This loop
+# ran `for d in /opt/homebrew/bin /usr/local/bin` and prepended each in turn, so
+# on a box carrying BOTH installs -- an Apple Silicon Mac that also has an
+# x86_64 Homebrew -- /usr/local/bin ended up FIRST. `command -v python3.11`
+# below then resolved an x86_64 interpreter, which python-publish.yml hands to
+# `maturin -i` while building `target: aarch64-apple-darwin`: an arch mismatch
+# on the publish lane, and the resulting wheel tagged for the wrong Python.
+#
+# So the prefix is chosen ONCE, native first, and only that one is prepended.
+# The other stays reachable via the runner's own PATH when it is there.
 for d in /opt/homebrew/bin /usr/local/bin; do
   if [[ -d "$d" ]]; then
     echo "$d" >> "$GITHUB_PATH"
     PATH="$d:$PATH"
     export PATH
+    # Only the first (native) prefix goes in front. Anything after it would
+    # only ever shadow the native interpreter on a dual-install box.
+    break
   fi
 done
 
